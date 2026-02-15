@@ -1,0 +1,33 @@
+#!/bin/sh
+# postrm — addrchain post-removal script
+set -e
+
+case "$1" in
+    purge)
+        # Remove config directory
+        rm -rf /etc/addrchain
+
+        # Remove system user
+        if getent passwd addrchain >/dev/null 2>&1; then
+            userdel addrchain 2>/dev/null || true
+        fi
+
+        # Remove DKMS source
+        rm -rf /usr/src/addrchain-*
+
+        # Reload systemd
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

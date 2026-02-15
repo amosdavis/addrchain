@@ -1,0 +1,45 @@
+#!/bin/sh
+# postinst — addrchain post-installation script
+# Idempotent: safe to run multiple times (CI-02 mitigation)
+set -e
+
+case "$1" in
+    configure)
+        # Create addrchain system user if not exists
+        if ! getent passwd addrchain >/dev/null 2>&1; then
+            useradd --system --no-create-home --shell /usr/sbin/nologin addrchain
+        fi
+
+        # Create config directory with restricted permissions
+        if [ ! -d /etc/addrchain ]; then
+            mkdir -p /etc/addrchain
+            chown addrchain:addrchain /etc/addrchain
+            chmod 0700 /etc/addrchain
+        fi
+
+        # Install DKMS module
+        DKMS_VERSION=$(cat /usr/src/addrchain-*/dkms.conf 2>/dev/null | grep PACKAGE_VERSION | head -1 | cut -d= -f2 | tr -d '"' || true)
+        if [ -n "$DKMS_VERSION" ] && command -v dkms >/dev/null 2>&1; then
+            dkms add -m addrchain -v "$DKMS_VERSION" 2>/dev/null || true
+            dkms build -m addrchain -v "$DKMS_VERSION" 2>/dev/null || echo "WARNING: DKMS build failed (kernel headers may be missing)"
+            dkms install -m addrchain -v "$DKMS_VERSION" 2>/dev/null || echo "WARNING: DKMS install failed"
+        fi
+
+        # Enable and start systemd service
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload
+            systemctl enable addrchain.service
+            systemctl start addrchain.service || echo "WARNING: addrchain service failed to start"
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

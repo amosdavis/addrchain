@@ -1,0 +1,212 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+
+      - name: Compile userspace binaries
+        run: |
+          gcc -Wall -Wextra -Werror -std=c11 -O2 \
+            -DAC_VERSION_STR=\"$VERSION\" \
+            -o daemon/addrd daemon/addrd.c daemon/addrd_sync.c daemon/addrd_vpn.c \
+            common/ac_chain.c common/ac_claims.c common/ac_crypto.c \
+            common/ac_subnet.c common/ac_partition.c common/ac_vpn.c \
+            common/ac_discover.c common/ac_userspace_platform.c \
+            -I common -lpthread
+          gcc -Wall -Wextra -Werror -std=c11 -O2 \
+            -DAC_VERSION_STR=\"$VERSION\" \
+            -o cli/addrctl cli/addrctl.c \
+            common/ac_chain.c common/ac_claims.c common/ac_crypto.c \
+            common/ac_subnet.c common/ac_partition.c common/ac_vpn.c \
+            common/ac_discover.c common/ac_userspace_platform.c \
+            -I common -lpthread
+
+      - name: Build .deb package
+        run: make deb
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: dist/*.deb
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION).Trim()
+          echo "VERSION=$v" >> $env:GITHUB_ENV
+
+      - name: Compile binaries
+        shell: msys2 {0}
+        run: |
+          gcc -Wall -Wextra -Werror -std=c11 -O2 \
+            -DAC_VERSION_STR=\"$VERSION\" \
+            -o daemon/addrd.exe daemon/addrd.c daemon/addrd_sync.c daemon/addrd_vpn.c \
+            common/ac_chain.c common/ac_claims.c common/ac_crypto.c \
+            common/ac_subnet.c common/ac_partition.c common/ac_vpn.c \
+            common/ac_discover.c common/ac_userspace_platform.c \
+            -I common -ladvapi32 -lws2_32
+          gcc -Wall -Wextra -Werror -std=c11 -O2 \
+            -DAC_VERSION_STR=\"$VERSION\" \
+            -o cli/addrctl.exe cli/addrctl.c \
+            common/ac_chain.c common/ac_claims.c common/ac_crypto.c \
+            common/ac_subnet.c common/ac_partition.c common/ac_vpn.c \
+            common/ac_discover.c common/ac_userspace_platform.c \
+            -I common -ladvapi32
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix
+          echo "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION).Trim()
+          # Copy binaries to staging
+          New-Item -Type Directory -Path staging -Force | Out-Null
+          Copy-Item daemon/addrd.exe staging/
+          Copy-Item cli/addrctl.exe staging/
+          # Build MSI with WiX
+          wix build packaging/windows/Product.wxs `
+            -d Version=$version `
+            -d StagingDir=staging `
+            -o dist/addrchain-$version.msi
+        continue-on-error: true
+
+      - name: Sign MSI
+        if: env.SIGN_CERT != ''
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION).Trim()
+          signtool sign /f $env:SIGN_CERT /p $env:SIGN_PASSWORD /t http://timestamp.digicert.com "dist/addrchain-$version.msi"
+        env:
+          SIGN_CERT: ${{ secrets.SIGN_CERT }}
+          SIGN_PASSWORD: ${{ secrets.SIGN_PASSWORD }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: |
+            dist/*.msi
+            daemon/addrd.exe
+            cli/addrctl.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+
+      - name: Compile binaries
+        run: |
+          gcc -Wall -Wextra -Werror -std=c11 -O2 \
+            -DAC_VERSION_STR=\"$VERSION\" \
+            -o daemon/addrd daemon/addrd.c daemon/addrd_sync.c daemon/addrd_vpn.c \
+            common/ac_chain.c common/ac_claims.c common/ac_crypto.c \
+            common/ac_subnet.c common/ac_partition.c common/ac_vpn.c \
+            common/ac_discover.c common/ac_userspace_platform.c \
+            -I common
+          gcc -Wall -Wextra -Werror -std=c11 -O2 \
+            -DAC_VERSION_STR=\"$VERSION\" \
+            -o cli/addrctl cli/addrctl.c \
+            common/ac_chain.c common/ac_claims.c common/ac_crypto.c \
+            common/ac_subnet.c common/ac_partition.c common/ac_vpn.c \
+            common/ac_discover.c common/ac_userspace_platform.c \
+            -I common
+
+      - name: Codesign (if available)
+        if: env.APPLE_CERT_BASE64 != ''
+        run: |
+          codesign --sign "$APPLE_IDENTITY" daemon/addrd cli/addrctl
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+
+      - name: Create tarball
+        run: |
+          mkdir -p dist
+          tar czf dist/addrchain-${VERSION}-darwin-amd64.tar.gz \
+            daemon/addrd cli/addrctl README.md spec/
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package
+          path: dist/*.tar.gz
+
+  release:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.deb' -o -name '*.msi' -o -name '*.tar.gz' -o -name '*.exe' \) -exec cp {} release/ \;
+          cd release && sha256sum * > SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap
+        if: env.TAP_TOKEN != ''
+        run: |
+          SHA=$(sha256sum release/addrchain-${VERSION}-darwin-amd64.tar.gz | cut -d' ' -f1)
+          URL="https://github.com/amosdavis/addrchain/releases/download/v${VERSION}/addrchain-${VERSION}-darwin-amd64.tar.gz"
+          # Clone tap repo, update formula, push
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/amosdavis/homebrew-addrchain.git tap
+          cd tap
+          sed -i "s|url \".*\"|url \"${URL}\"|" addrchain.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" addrchain.rb
+          sed -i "s|version \".*\"|version \"${VERSION}\"|" addrchain.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add addrchain.rb
+          git commit -m "Update addrchain to v${VERSION}" || echo "No changes"
+          git push
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}

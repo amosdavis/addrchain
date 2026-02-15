@@ -1,0 +1,14 @@
+Package: addrchain
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: dkms, build-essential, linux-headers-generic | linux-headers-amd64
+Maintainer: Amos Davis <amosdavis@users.noreply.github.com>
+Homepage: https://github.com/amosdavis/addrchain
+Description: Blockchain-based network address management
+ addrchain replaces DHCP with a decentralized blockchain ledger for
+ self-assignable IPv4, IPv6, and POOL 256-bit network addresses.
+ Includes a Linux kernel module (via DKMS), userspace daemon (addrd),
+ and CLI tool (addrctl). Supports VPN tunnel management (WireGuard,
+ IPsec, POOL), subnet creation, and network partitioning.

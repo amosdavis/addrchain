@@ -1,0 +1,31 @@
+[Unit]
+Description=addrchain blockchain address daemon
+Documentation=https://github.com/amosdavis/addrchain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/addrd --config-dir /etc/addrchain
+Restart=on-failure
+RestartSec=5
+
+User=addrchain
+Group=addrchain
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/etc/addrchain
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+# Capabilities needed for network address assignment
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

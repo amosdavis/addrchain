@@ -1,1 +1,13 @@
-addrchain.exe
+*.exe
+*.o
+*.obj
+*.sys
+*.ko
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+*.cmd
+.tmp_versions/
+dist/
+staging/

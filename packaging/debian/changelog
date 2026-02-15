@@ -1,0 +1,12 @@
+addrchain (2.0.0-1) stable; urgency=medium
+
+  * Initial release of addrchain v2
+  * Blockchain-based network address management replacing DHCP
+  * Linux kernel module (via DKMS) + userspace daemon + CLI
+  * IPv4, IPv6, and POOL 256-bit address support
+  * VPN tunnel management (WireGuard, IPsec, POOL)
+  * Subnet management with CIDR validation
+  * Network partitioning with cross-partition deny-by-default
+  * Peer autodiscovery (multicast, broadcast, mDNS, static)
+
+ -- Amos Davis <amosdavis@users.noreply.github.com>  Sat, 15 Feb 2026 22:00:00 +0000

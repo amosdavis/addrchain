@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <?define Version = "!(bind.FileVersion.addrd.exe)" ?>
+
+  <Package Name="addrchain"
+           Version="$(var.Version)"
+           Manufacturer="addrchain"
+           UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+           Language="1033"
+           Codepage="1252"
+           InstallerVersion="500"
+           Compressed="yes"
+           Scope="perMachine">
+
+    <MajorUpgrade AllowDowngrades="no"
+                  DowngradeErrorMessage="A newer version of addrchain is already installed."
+                  Schedule="afterInstallValidate" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Directory structure -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="addrchain">
+        <Directory Id="BinFolder" Name="bin" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="ConfigFolder" Name="addrchain" />
+    </StandardDirectory>
+
+    <!-- Binaries -->
+    <ComponentGroup Id="Binaries" Directory="BinFolder">
+      <Component Id="Daemon" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <File Id="addrd.exe" Source="$(var.StagingDir)\addrd.exe" KeyPath="yes" />
+
+        <!-- Install as Windows service -->
+        <ServiceInstall Id="AddrchainService"
+                       Name="addrchain"
+                       DisplayName="addrchain Address Daemon"
+                       Description="Blockchain-based network address management daemon"
+                       Start="auto"
+                       Type="ownProcess"
+                       ErrorControl="normal"
+                       Arguments="--config-dir &quot;[ConfigFolder]&quot;" />
+
+        <ServiceControl Id="AddrchainServiceControl"
+                       Name="addrchain"
+                       Start="install"
+                       Stop="both"
+                       Remove="uninstall"
+                       Wait="yes" />
+      </Component>
+
+      <Component Id="CLI" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+        <File Id="addrctl.exe" Source="$(var.StagingDir)\addrctl.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- Add to PATH -->
+      <Component Id="PathEnv" Guid="D4E5F6A7-B8C9-0123-DEFA-234567890123">
+        <Environment Id="PATH" Name="PATH" Value="[BinFolder]"
+                    Permanent="no" Part="last" Action="set" System="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Config directory -->
+    <ComponentGroup Id="Config" Directory="ConfigFolder">
+      <Component Id="ConfigDir" Guid="E5F6A7B8-C9D0-1234-EFAB-345678901234">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveConfigDir" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Firewall rules -->
+    <ComponentGroup Id="Firewall" Directory="BinFolder">
+      <Component Id="FirewallDiscovery" Guid="F6A7B8C9-D0E1-2345-FABC-456789012345">
+        <util:FirewallException Id="FwDiscovery"
+                               Name="addrchain Discovery"
+                               Protocol="udp"
+                               Port="9876"
+                               Scope="any"
+                               Profile="all"
+                               Description="addrchain peer discovery (UDP)" />
+      </Component>
+
+      <Component Id="FirewallSync" Guid="A7B8C9D0-E1F2-3456-ABCD-567890123456">
+        <util:FirewallException Id="FwSync"
+                               Name="addrchain Sync"
+                               Protocol="tcp"
+                               Port="9877"
+                               Scope="any"
+                               Profile="all"
+                               Description="addrchain chain sync (TCP)" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Feature tree -->
+    <Feature Id="Complete" Title="addrchain" Level="1">
+      <ComponentGroupRef Id="Binaries" />
+      <ComponentGroupRef Id="Config" />
+      <ComponentGroupRef Id="Firewall" />
+    </Feature>
+
+  </Package>
+</Wix>

@@ -1,0 +1,91 @@
+name: APT Repository
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+concurrency:
+  group: apt-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  publish-apt:
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+
+      - name: Install tools
+        run: sudo apt-get install -y dpkg-dev apt-utils gnupg2
+
+      - name: Download .deb from latest release
+        run: |
+          mkdir -p apt-repo/pool/main
+          gh release download --pattern '*.deb' --dir apt-repo/pool/main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import GPG key
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-keys --with-colons | grep '^pub' | head -1 | cut -d: -f5)
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Generate APT metadata
+        run: |
+          cd apt-repo
+          mkdir -p dists/stable/main/binary-amd64
+
+          # Generate Packages
+          dpkg-scanpackages pool/main /dev/null > dists/stable/main/binary-amd64/Packages
+          gzip -k dists/stable/main/binary-amd64/Packages
+
+          # Generate Release
+          cd dists/stable
+          apt-ftparchive release . > Release
+
+          # Sign Release
+          gpg --batch --yes --default-key "$GPG_KEY_ID" --detach-sign -a -o Release.gpg Release
+          gpg --batch --yes --default-key "$GPG_KEY_ID" --clearsign -o InRelease Release
+
+      - name: Export GPG public key
+        run: |
+          gpg --export --armor "$GPG_KEY_ID" > apt-repo/addrchain.gpg.key
+
+      - name: Generate install.sh
+        run: |
+          cat > apt-repo/install.sh << 'INSTALL_EOF'
+          #!/bin/sh
+          # Install addrchain APT repository
+          set -e
+          echo "Adding addrchain APT repository..."
+          curl -fsSL https://amosdavis.github.io/addrchain/addrchain.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/addrchain-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/addrchain-archive-keyring.gpg] https://amosdavis.github.io/addrchain stable main" | sudo tee /etc/apt/sources.list.d/addrchain.list
+          sudo apt-get update
+          echo "Done. Install with: sudo apt-get install addrchain"
+          INSTALL_EOF
+          chmod +x apt-repo/install.sh
+
+      - name: Deploy to gh-pages
+        run: |
+          cd apt-repo
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan gh-pages
+          git add -A
+          git commit -m "Update APT repository for v${VERSION}"
+          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/amosdavis/addrchain.git
+          git push -f origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,34 @@
+#!/bin/sh
+# prerm — addrchain pre-removal script
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        # Stop service
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop addrchain.service 2>/dev/null || true
+            systemctl disable addrchain.service 2>/dev/null || true
+        fi
+
+        # Remove DKMS module
+        DKMS_VERSION=$(cat /usr/src/addrchain-*/dkms.conf 2>/dev/null | grep PACKAGE_VERSION | head -1 | cut -d= -f2 | tr -d '"' || true)
+        if [ -n "$DKMS_VERSION" ] && command -v dkms >/dev/null 2>&1; then
+            dkms remove -m addrchain -v "$DKMS_VERSION" --all 2>/dev/null || true
+        fi
+
+        # Unload kernel module if loaded
+        if lsmod | grep -q addrchain 2>/dev/null; then
+            rmmod addrchain 2>/dev/null || echo "WARNING: could not unload addrchain module"
+        fi
+        ;;
+
+    failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
