@@ -1,0 +1,51 @@
+;
+; ac_win_filter.inf — addrchain NDIS lightweight filter driver
+;
+; Install: Right-click → Install
+; Or: netcfg -l ac_win_filter.inf -c s -i addrchain
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = NetService
+ClassGuid   = {4D36E974-E325-11CE-BFC1-08002BE10318}
+Provider    = %Provider%
+DriverVer   = 01/01/2025,2.0.0.0
+CatalogFile = addrchain.cat
+
+[Manufacturer]
+%Provider% = Models,NTamd64
+
+[Models.NTamd64]
+%FilterDesc% = Install, addrchain
+
+[Install]
+AddReg = Install.AddReg
+Characteristics = 0x40000    ; NCF_LW_FILTER
+NetCfgInstanceId = "{12345678-ABCD-EF01-2345-6789ABCDEF01}"
+
+[Install.AddReg]
+HKR, Ndi, Service,, "addrchain"
+HKR, Ndi, CoServices, 0x00010000, "addrchain"
+HKR, Ndi, HelpText,, %FilterDesc%
+HKR, Ndi, FilterClass,, ms_switch_filter
+HKR, Ndi, FilterType, 0x00010001, 2
+HKR, Ndi, FilterRunType, 0x00010001, 2
+HKR, Ndi\Interfaces, UpperRange,, noupper
+HKR, Ndi\Interfaces, LowerRange,, nolower
+HKR, Ndi\Interfaces, FilterMediaTypes,, "ethernet"
+
+[Install.Services]
+AddService = addrchain,, ServiceInstall
+
+[ServiceInstall]
+DisplayName    = %ServiceName%
+ServiceType    = 1    ; SERVICE_KERNEL_DRIVER
+StartType      = 3    ; SERVICE_DEMAND_START
+ErrorControl   = 1    ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\addrchain.sys
+
+[Strings]
+Provider    = "addrchain"
+FilterDesc  = "addrchain Blockchain Address Filter"
+ServiceName = "addrchain"
