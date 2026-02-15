@@ -4,6 +4,65 @@
 
 Evolve addrchain from a Go userspace application into a kernel-level network address management system that fully replaces DHCP. Must operate as native kernel modules on Linux, Windows, and macOS, supporting IPv4, IPv6, and POOL 256-bit addresses. Must provide autodiscovery via blockchain, VPN tunnel assignment (WireGuard, IPsec, custom POOL-based), and network subnetting/partitioning — all managed through the blockchain ledger.
 
+---
+
+## Phase 10 — CI/CD & Package Distribution
+
+### Problem
+
+Set up GitHub Actions to build, test, and publish platform-specific packages:
+- **Linux:** `.deb` packages published to a GitHub Pages–hosted APT repository
+- **Windows:** MSI installer built with WiX Toolset
+- **macOS:** Homebrew formula published to a `homebrew-addrchain` tap repository
+
+### Approach
+
+Three CI workflows + packaging infrastructure:
+
+1. **ci.yml** — Runs on every push/PR. Builds and tests on all 3 platforms (ubuntu, windows, macos). Gates merges.
+2. **release.yml** — Triggered by version tags (`v*`). Builds platform packages, creates GitHub Release with all artifacts.
+3. **apt-repo.yml** — Post-release. Signs `.deb` packages with GPG, updates APT repo metadata (`Packages`, `Release`, `InRelease`), pushes to `gh-pages` branch.
+
+### Todos (hardened — zero partial/deferred items)
+
+- **p10-version-file** — `VERSION` file at repo root (e.g. `2.0.0`), read by all build scripts for consistent versioning
+- **p10-ci-workflow** — `.github/workflows/ci.yml`: matrix build (ubuntu-22.04, windows-latest, macos-latest). Ubuntu: install linux-headers, compile+run unit tests, compile daemon+CLI, build kernel module (`make module`). Windows: compile+run unit tests, compile daemon+CLI. macOS: compile+run unit tests, compile daemon+CLI. All platforms: run BDD tests (`cd tests && go test -v`). Triggered on push/PR. `-Werror` enforced.
+- **p10-makefile-update** — Update Makefile: `VERSION := $(shell cat VERSION)`, `CFLAGS += -DAC_VERSION_STR`, detect OS for LIBS (`-lpthread` on Linux, `-ladvapi32 -lws2_32` on Windows). Add `make deb` (gated on `dpkg-deb`), `make userspace` targets.
+- **p10-systemd-unit** — `packaging/debian/addrchain.service`: `Type=simple` (daemon does not implement `sd_notify` yet), `ExecStart=/usr/sbin/addrd --config-dir /etc/addrchain`, `Restart=on-failure`, `RestartSec=5`, `User=addrchain`, `Group=addrchain`, security hardening (`ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges=yes`, `ReadWritePaths=/etc/addrchain`), `After=network-online.target`, `WantedBy=multi-user.target`.
+- **p10-deb-packaging** — `packaging/debian/`: `control` (Depends: dkms, build-essential, linux-headers), `rules` (dh build), `changelog`, `dkms.conf` (installs source to `/usr/src/addrchain-VERSION`, postinst runs `dkms install`), `postinst` (idempotent: create `addrchain` system user if not exists, `mkdir -p /etc/addrchain` with 0700, `systemctl daemon-reload && systemctl enable addrchain`), `prerm` (`systemctl stop`, `dkms remove`), `postrm` (purge: remove `/etc/addrchain`, `userdel addrchain`), `conffiles` (`/etc/addrchain`).
+- **p10-release-workflow** — `.github/workflows/release.yml`: triggered by `v*` tags. Ubuntu: build `.deb` via `dpkg-deb`. Windows: compile daemon+CLI, build MSI via WiX (`candle`+`light`), sign MSI with `signtool` if `SIGN_CERT` secret exists (warn if not). macOS: compile daemon+CLI, create `.tar.gz`, `codesign`+`notarytool` if `APPLE_ID` secret exists (warn if not). Compute SHA256 of all artifacts. Create GitHub Release with `.deb` + `.msi` + `.tar.gz` + `SHA256SUMS`. Push updated formula to `amosdavis/homebrew-addrchain` repo via GitHub API (new SHA256 + download URL).
+- **p10-apt-repo** — `.github/workflows/apt-repo.yml`: `workflow_run` trigger on release.yml success. Download `.deb` from latest release. Sign with GPG (`GPG_PRIVATE_KEY` repo secret). Generate APT metadata: `dpkg-scanpackages` → `Packages.gz`, `apt-ftparchive release` → `Release`, `gpg --detach-sign` → `Release.gpg`, `gpg --clearsign` → `InRelease`. Create `gh-pages` orphan branch if missing. Generate `install.sh` (adds GPG key + repo source list) and publish alongside. Concurrency group: `apt-publish` (max 1, cancel-in-progress: false).
+- **p10-wix-packaging** — `packaging/windows/Product.wxs`: WiX v4. Stable `UpgradeCode` GUID (never changes). `MajorUpgrade` with `AllowDowngrades=no`. Directory `ProgramFiles/addrchain/bin` (addrd.exe, addrctl.exe). Components: add bin to `PATH` (Environment), install as Windows service (`ServiceInstall`+`ServiceControl`, auto start, LocalSystem), firewall rules (`util:FirewallException` UDP 9876, TCP 9877), create `C:\ProgramData\addrchain` config dir. `RemoveFolder` on uninstall. Custom action: `sc stop`+`sc delete addrchain`, remove firewall rules.
+- **p10-homebrew-tap** — `packaging/homebrew/addrchain.rb`: Homebrew formula in `amosdavis/homebrew-addrchain` repo. `url` → GitHub Release tarball, `sha256` placeholder (injected by release workflow). `depends_on :linux_headers` on Linux. `install`: compile daemon+CLI with system gcc, `bin.install` addrd+addrctl, `etc.install` sample config. `service`: launchd plist (`KeepAlive`, `RunAtLoad`). `test`: `system bin/"addrctl", "status"`.
+
+### Failure modes addressed
+
+| ID | Risk | Mitigation |
+|----|------|------------|
+| CI-01 | Tests pass locally but fail in CI | Matrix build on all 3 OS; -Werror enforced |
+| CI-02 | .deb postinst fails on install | postinst is idempotent; checks before creating users/dirs |
+| CI-03 | APT repo metadata corrupted | apt-ftparchive generates fresh; gpg --verify in CI |
+| CI-04 | MSI install fails silently | WiX burn bootstrapper with error logging; custom actions log to Event Log |
+| CI-05 | Homebrew bottle hash mismatch | SHA256 computed in release workflow, injected into formula |
+| CI-06 | GPG key expires | Key stored as repo secret; alert workflow checks expiry |
+| CI-07 | Version mismatch between binary and package | Single VERSION file, read by Makefile/WiX/Homebrew/deb |
+| CI-08 | Kernel module DKMS build fails on user machine | dkms.conf tested in CI on multiple kernel versions |
+| CI-09 | Service doesn't start after install | postinst enables+starts; CI spins up VM and verifies |
+| CI-10 | Concurrent release publishes corrupt APT repo | apt-repo.yml uses concurrency group (limit 1) |
+
+### Dependencies
+
+```
+p10-version-file
+  └→ p10-ci-workflow
+       └→ p10-deb-packaging + p10-systemd-unit
+            └→ p10-release-workflow
+                 └→ p10-apt-repo
+                 └→ p10-wix-packaging
+                 └→ p10-homebrew-tap
+       └→ p10-makefile-update
+```
+
 ## Approach
 
 **Hybrid architecture with kernel-resident blockchain engine:**
