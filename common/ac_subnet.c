@@ -12,6 +12,7 @@
 #include "ac_subnet.h"
 #include "ac_chain.h"
 #include "ac_crypto.h"
+#include "ac_dag.h"
 
 #include <string.h>
 
@@ -245,6 +246,15 @@ static int apply_subnet_create(ac_subnet_store_t *ss,
         return AC_ERR_NOMEM;
     }
     ss->subnet_count++;
+
+    /* DAG: register subnet node */
+    if (ss->dag) {
+        uint8_t dag_id[AC_MAX_ADDR_LEN];
+        memset(dag_id, 0, AC_MAX_ADDR_LEN);
+        memcpy(dag_id, sc->subnet_id, AC_SUBNET_ID_LEN);
+        ac_dag_add_node(ss->dag, AC_RES_SUBNET, dag_id);
+    }
+
     ac_log(AC_LOG_INFO, "subnet created: %.31s", sc->subnet_id);
     return AC_OK;
 }
@@ -408,10 +418,16 @@ static int validate_subnet_delete(ac_subnet_store_t *ss,
         return AC_ERR_NOENT;
     }
 
-    /*
-     * TODO (Stage 2): replace with ac_dag_dependents() query to check
-     * that no active claims reference this subnet before deletion.
-     */
+    /* Check DAG for dependent claims before allowing deletion */
+    if (ss->dag) {
+        uint8_t dag_id[AC_MAX_ADDR_LEN];
+        memset(dag_id, 0, AC_MAX_ADDR_LEN);
+        memcpy(dag_id, sd->subnet_id, AC_SUBNET_ID_LEN);
+        if (ac_dag_has_dependents(ss->dag, AC_RES_SUBNET, dag_id)) {
+            ac_log(AC_LOG_WARN, "validate: subnet has dependents, cannot delete");
+            return AC_ERR_EXIST;
+        }
+    }
 
     return AC_OK;
 }
@@ -429,6 +445,14 @@ static int apply_subnet_delete(ac_subnet_store_t *ss,
     rec->active = 0;
     if (ss->subnet_count > 0)
         ss->subnet_count--;
+
+    /* DAG: remove subnet node (edges pruned automatically) */
+    if (ss->dag) {
+        uint8_t dag_id[AC_MAX_ADDR_LEN];
+        memset(dag_id, 0, AC_MAX_ADDR_LEN);
+        memcpy(dag_id, sd->subnet_id, AC_SUBNET_ID_LEN);
+        ac_dag_remove_node(ss->dag, AC_RES_SUBNET, dag_id);
+    }
 
     ac_log(AC_LOG_INFO, "subnet deleted: %.31s", sd->subnet_id);
     return AC_OK;
@@ -482,7 +506,8 @@ static int check_update_delete_conflict(const ac_block_t *blk)
 /* ================================================================== */
 
 int ac_subnet_init(ac_subnet_store_t *ss,
-                   uint32_t max_subnets, uint32_t max_members)
+                   uint32_t max_subnets, uint32_t max_members,
+                   ac_dag_t *dag)
 {
     int rc;
 
@@ -490,6 +515,7 @@ int ac_subnet_init(ac_subnet_store_t *ss,
         return AC_ERR_INVAL;
 
     memset(ss, 0, sizeof(*ss));
+    ss->dag = dag;
 
     rc = ac_mutex_init(&ss->lock);
     if (rc != AC_OK)

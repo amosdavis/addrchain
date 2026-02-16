@@ -120,7 +120,7 @@ static void test_vpn_init_destroy(void)
     ac_vpn_store_t vs;
     TEST("vpn store init and destroy");
 
-    ASSERT_OK(ac_vpn_init(&vs, 0), "init");
+    ASSERT_OK(ac_vpn_init(&vs, 0, NULL), "init");
     ASSERT_EQ(ac_vpn_count(&vs), 0, "empty");
 
     ac_vpn_destroy(&vs);
@@ -135,7 +135,7 @@ static void test_vpn_key_creates_tunnel(void)
     const ac_vpn_tunnel_t *tun;
     TEST("VPN_KEY creates KEYED tunnel");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -161,7 +161,7 @@ static void test_vpn_tunnel_config(void)
     const ac_vpn_tunnel_t *tun;
     TEST("VPN_TUNNEL sets endpoint config");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -188,7 +188,7 @@ static void test_vpn_state_transitions(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("state machine transitions");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -219,7 +219,7 @@ static void test_vpn_invalid_transition(void)
     int rc;
     TEST("invalid state transition rejected");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -243,7 +243,7 @@ static void test_vpn_handshake_marking(void)
     uint64_t now;
     TEST("handshake marking advances to ACTIVE");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -269,7 +269,7 @@ static void test_vpn_traffic_counters(void)
     const ac_vpn_tunnel_t *tun;
     TEST("traffic counter updates");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -294,7 +294,7 @@ static void test_vpn_prune_stale(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("prune stale KEYED tunnels after timeout");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -319,7 +319,7 @@ static void test_vpn_invalid_protocol(void)
     int rc;
     TEST("invalid VPN protocol rejected");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -349,7 +349,7 @@ static void test_vpn_zero_port_rejected(void)
     int rc;
     TEST("zero listen_port rejected");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -380,7 +380,7 @@ static void test_vpn_mtu_too_low(void)
     int rc;
     TEST("MTU below 576 rejected (N25)");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -410,7 +410,7 @@ static void test_vpn_rebuild(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("rebuild from chain");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
 
     ac_genesis_block(&blocks[0]);
@@ -428,7 +428,7 @@ static void test_vpn_null_safety(void)
 {
     TEST("NULL parameter safety (K01)");
 
-    ASSERT_NE(ac_vpn_init(NULL, 0), AC_OK, "init(NULL)");
+    ASSERT_NE(ac_vpn_init(NULL, 0, NULL), AC_OK, "init(NULL)");
     ASSERT_EQ(ac_vpn_count(NULL), 0, "count(NULL)");
     ASSERT_EQ((uintptr_t)ac_vpn_find(NULL, NULL), (uintptr_t)NULL, "find(NULL)");
 
@@ -443,7 +443,7 @@ static void test_vpn_multiple_protocols(void)
     const ac_vpn_tunnel_t *tun;
     TEST("same node, different VPN protocols");
 
-    ac_vpn_init(&vs, 0);
+    ac_vpn_init(&vs, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 

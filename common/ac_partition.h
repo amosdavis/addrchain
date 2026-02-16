@@ -16,6 +16,7 @@
 #include "ac_proto.h"
 #include "ac_platform.h"
 #include "ac_hashmap.h"
+#include "ac_dag.h"
 
 /* ------------------------------------------------------------------ */
 /*  Limits (legacy constants removed; now dynamic via hashmap)         */
@@ -68,6 +69,7 @@ typedef struct {
     uint32_t        max_cross_rules; /* 0 = unlimited (userspace) */
 
     ac_mutex_t      lock;
+    ac_dag_t       *dag;            /* optional DAG for dependency tracking */
 } ac_partition_store_t;
 
 /* ------------------------------------------------------------------ */
@@ -76,7 +78,8 @@ typedef struct {
 
 int ac_partition_init(ac_partition_store_t *ps,
                       uint32_t max_partitions,
-                      uint32_t max_cross_rules);
+                      uint32_t max_cross_rules,
+                      ac_dag_t *dag);
 void ac_partition_destroy(ac_partition_store_t *ps);
 
 int ac_partition_validate_block(ac_partition_store_t *ps,

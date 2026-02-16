@@ -17,6 +17,7 @@
 
 #include "ac_vpn.h"
 #include "ac_crypto.h"
+#include "ac_dag.h"
 
 #include <string.h>
 
@@ -213,6 +214,10 @@ static void apply_vpn_key(ac_vpn_store_t *vs,
         }
     }
 
+    /* DAG: register tunnel node */
+    if (vs->dag)
+        ac_dag_add_node(vs->dag, AC_RES_VPN_TUNNEL, node_pubkey);
+
     ac_log(AC_LOG_INFO, "vpn: new tunnel registered (proto=%u, state=KEYED)",
            vk->vpn_proto);
 }
@@ -273,7 +278,7 @@ static void apply_vpn_tunnel(ac_vpn_store_t *vs,
 /*  Public API                                                         */
 /* ================================================================== */
 
-int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels)
+int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels, ac_dag_t *dag)
 {
     int rc;
 
@@ -282,6 +287,7 @@ int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels)
 
     memset(vs, 0, sizeof(*vs));
     vs->max_tunnels = max_tunnels;
+    vs->dag = dag;
 
     rc = ac_mutex_init(&vs->lock);
     if (rc != AC_OK)
@@ -454,6 +460,9 @@ int ac_vpn_transition(ac_vpn_store_t *vs,
     tun->state = new_state;
     if (new_state == AC_VPN_STATE_CLOSED) {
         uint8_t key[AC_VPN_KEY_LEN];
+        /* DAG: remove tunnel node */
+        if (vs->dag)
+            ac_dag_remove_node(vs->dag, AC_RES_VPN_TUNNEL, tun->remote_pubkey);
         tun->active = 0;
         make_tunnel_key(key, tun->remote_pubkey, tun->vpn_proto);
         ac_hashmap_remove(&vs->tunnel_map, key, AC_VPN_KEY_LEN);
@@ -528,6 +537,9 @@ void ac_vpn_prune_stale(ac_vpn_store_t *vs, uint64_t now)
             now > tun->created_at &&
             (now - tun->created_at) > AC_VPN_HANDSHAKE_TIMEOUT_SEC) {
             ac_log(AC_LOG_WARN, "vpn: tunnel handshake timeout, closing");
+            /* DAG: remove tunnel node */
+            if (vs->dag)
+                ac_dag_remove_node(vs->dag, AC_RES_VPN_TUNNEL, tun->remote_pubkey);
             tun->state = AC_VPN_STATE_CLOSED;
             tun->active = 0;
             ac_hashmap_iter_remove(&it);

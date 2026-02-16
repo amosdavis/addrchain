@@ -103,7 +103,7 @@ static void test_partition_init_destroy(void)
     ac_partition_store_t ps;
     TEST("partition store init and destroy");
 
-    ASSERT_OK(ac_partition_init(&ps, 0, 0), "init should succeed");
+    ASSERT_OK(ac_partition_init(&ps, 0, 0, NULL), "init should succeed");
     ASSERT_EQ(ac_partition_count(&ps), 0, "should start empty");
 
     ac_partition_destroy(&ps);
@@ -118,7 +118,7 @@ static void test_partition_create(void)
     const ac_partition_record_t *rec;
     TEST("create a partition");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -145,7 +145,7 @@ static void test_partition_duplicate_rejected(void)
     int rc;
     TEST("duplicate partition_id rejected");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -170,7 +170,7 @@ static void test_partition_vlan_uniqueness(void)
     int rc;
     TEST("VLAN ID uniqueness enforced (N16)");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -195,7 +195,7 @@ static void test_partition_add_remove_subnet(void)
     const ac_partition_record_t *rec;
     TEST("add and remove subnets from partition");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -240,7 +240,7 @@ static void test_partition_cross_traffic_default_deny(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("cross-partition traffic denied by default (N22)");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -274,7 +274,7 @@ static void test_partition_allow_cross(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("ALLOW_CROSS / DENY_CROSS lifecycle");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -319,7 +319,7 @@ static void test_partition_delete(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("delete partition");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -348,7 +348,7 @@ static void test_partition_rebuild(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("rebuild from chain");
 
-    ac_partition_init(&ps, 0, 0);
+    ac_partition_init(&ps, 0, 0, NULL);
     make_keypair(pub, priv);
 
     ac_genesis_block(&blocks[0]);
@@ -370,7 +370,7 @@ static void test_partition_null_safety(void)
 {
     TEST("NULL parameter safety (K01)");
 
-    ASSERT_NE(ac_partition_init(NULL, 0, 0), AC_OK, "init(NULL)");
+    ASSERT_NE(ac_partition_init(NULL, 0, 0, NULL), AC_OK, "init(NULL)");
     ASSERT_EQ(ac_partition_count(NULL), 0, "count(NULL)");
     ASSERT_EQ((uintptr_t)ac_partition_find(NULL, NULL), (uintptr_t)NULL, "find(NULL)");
     ASSERT_EQ(ac_partition_allowed(NULL, NULL, NULL), 0, "allowed(NULL) = denied");

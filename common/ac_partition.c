@@ -12,6 +12,7 @@
 
 #include "ac_partition.h"
 #include "ac_chain.h"
+#include "ac_dag.h"
 
 #include <string.h>
 
@@ -261,6 +262,15 @@ static void apply_partition_tx(ac_partition_store_t *ps,
                 return;
             }
             ps->partition_count++;
+
+            /* DAG: register partition node */
+            if (ps->dag) {
+                uint8_t dag_id[AC_MAX_ADDR_LEN];
+                memset(dag_id, 0, AC_MAX_ADDR_LEN);
+                memcpy(dag_id, pt->partition_id, AC_PARTITION_ID_LEN);
+                ac_dag_add_node(ps->dag, AC_RES_PARTITION, dag_id);
+            }
+
             ac_log(AC_LOG_INFO, "partition created: %.31s", pt->partition_id);
         }
         break;
@@ -269,6 +279,13 @@ static void apply_partition_tx(ac_partition_store_t *ps,
         rec = find_mut(ps, pt->partition_id);
         if (rec) {
             rec->active = 0;
+            /* DAG: remove partition node (edges pruned automatically) */
+            if (ps->dag) {
+                uint8_t dag_id[AC_MAX_ADDR_LEN];
+                memset(dag_id, 0, AC_MAX_ADDR_LEN);
+                memcpy(dag_id, pt->partition_id, AC_PARTITION_ID_LEN);
+                ac_dag_remove_node(ps->dag, AC_RES_PARTITION, dag_id);
+            }
             ac_log(AC_LOG_INFO, "partition deleted: %.31s", pt->partition_id);
         }
         break;
@@ -285,6 +302,19 @@ static void apply_partition_tx(ac_partition_store_t *ps,
             memcpy(rec->subnet_ids[rec->subnet_count],
                    pt->target_subnet_id, AC_SUBNET_ID_LEN);
             rec->subnet_count++;
+
+            /* DAG: subnet depends on partition */
+            if (ps->dag) {
+                uint8_t part_dag_id[AC_MAX_ADDR_LEN];
+                uint8_t sub_dag_id[AC_MAX_ADDR_LEN];
+                memset(part_dag_id, 0, AC_MAX_ADDR_LEN);
+                memset(sub_dag_id, 0, AC_MAX_ADDR_LEN);
+                memcpy(part_dag_id, pt->partition_id, AC_PARTITION_ID_LEN);
+                memcpy(sub_dag_id, pt->target_subnet_id, AC_SUBNET_ID_LEN);
+                ac_dag_add_edge(ps->dag, AC_RES_PARTITION, part_dag_id,
+                                AC_RES_SUBNET, sub_dag_id);
+            }
+
             ac_log(AC_LOG_INFO, "subnet added to partition %.31s",
                    pt->partition_id);
         }
@@ -302,6 +332,22 @@ static void apply_partition_tx(ac_partition_store_t *ps,
                                 (rec->subnet_count - 1 - i) * AC_SUBNET_ID_LEN);
                     }
                     rec->subnet_count--;
+
+                    /* DAG: remove subnet→partition edge */
+                    if (ps->dag) {
+                        uint8_t part_dag_id[AC_MAX_ADDR_LEN];
+                        uint8_t sub_dag_id[AC_MAX_ADDR_LEN];
+                        memset(part_dag_id, 0, AC_MAX_ADDR_LEN);
+                        memset(sub_dag_id, 0, AC_MAX_ADDR_LEN);
+                        memcpy(part_dag_id, pt->partition_id,
+                               AC_PARTITION_ID_LEN);
+                        memcpy(sub_dag_id, pt->target_subnet_id,
+                               AC_SUBNET_ID_LEN);
+                        ac_dag_remove_edge(ps->dag, AC_RES_PARTITION,
+                                           part_dag_id, AC_RES_SUBNET,
+                                           sub_dag_id);
+                    }
+
                     ac_log(AC_LOG_INFO, "subnet removed from partition %.31s",
                            pt->partition_id);
                     break;
@@ -402,7 +448,8 @@ static void free_all_cross_rules(ac_partition_store_t *ps)
 
 int ac_partition_init(ac_partition_store_t *ps,
                       uint32_t max_partitions,
-                      uint32_t max_cross_rules)
+                      uint32_t max_cross_rules,
+                      ac_dag_t *dag)
 {
     int rc;
 
@@ -410,6 +457,7 @@ int ac_partition_init(ac_partition_store_t *ps,
         return AC_ERR_INVAL;
 
     memset(ps, 0, sizeof(*ps));
+    ps->dag = dag;
 
     rc = ac_mutex_init(&ps->lock);
     if (rc != AC_OK)

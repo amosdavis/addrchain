@@ -31,6 +31,7 @@
 #include "ac_platform.h"
 #include "ac_chain.h"
 #include "ac_hashmap.h"
+#include "ac_dag.h"
 
 /* ------------------------------------------------------------------ */
 /*  Limits (legacy constants kept for reference; no longer enforced)    */
@@ -73,6 +74,7 @@ typedef struct {
     uint32_t            lease_ttl;      /* default lease in blocks */
     uint32_t            max_claims;     /* 0 = unlimited (userspace) */
     ac_mutex_t          lock;           /* K07: claim_lock (order 2) */
+    ac_dag_t           *dag;            /* optional DAG for dependency tracking */
 } ac_claim_store_t;
 
 /* ------------------------------------------------------------------ */
@@ -82,7 +84,8 @@ typedef struct {
 /* Initialize claim store with default or custom lease TTL.
  * If lease_ttl == 0, uses AC_DEFAULT_LEASE_BLOCKS.
  * max_claims: 0 = unlimited (userspace). In kernel, set from module param. */
-int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims);
+int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims,
+                   ac_dag_t *dag);
 
 /* Free claim store resources. */
 void ac_claims_destroy(ac_claim_store_t *cs);

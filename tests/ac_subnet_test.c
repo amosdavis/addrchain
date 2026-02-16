@@ -144,7 +144,7 @@ static void test_subnet_init_destroy(void)
     int rc;
     TEST("subnet store init and destroy");
 
-    rc = ac_subnet_init(&ss, 0, 0);
+    rc = ac_subnet_init(&ss, 0, 0, NULL);
     ASSERT_OK(rc, "init should succeed");
     ASSERT_EQ(ac_subnet_count(&ss), 0, "should start empty");
 
@@ -160,7 +160,7 @@ static void test_subnet_create_basic(void)
     const ac_subnet_record_t *rec;
     TEST("create a subnet");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -186,7 +186,7 @@ static void test_subnet_duplicate_id_rejected(void)
     int rc;
     TEST("duplicate subnet_id rejected (N11)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -211,7 +211,7 @@ static void test_subnet_overlap_rejected(void)
     int rc;
     TEST("overlapping prefix rejected (N11)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -237,7 +237,7 @@ static void test_subnet_no_overlap_different_ranges(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("non-overlapping prefixes allowed");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -264,7 +264,7 @@ static void test_subnet_gateway_required(void)
     int rc;
     TEST("gateway REQUIRED without --no-gateway (N14)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -300,7 +300,7 @@ static void test_subnet_no_gateway_flag(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("--no-gateway flag allows no gateway (N14)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -323,7 +323,7 @@ static void test_subnet_dns_required(void)
     int rc;
     TEST("DNS REQUIRED without --no-dns (N15)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -359,7 +359,7 @@ static void test_subnet_contains(void)
     ac_address_t inside, outside;
     TEST("prefix containment check (N12)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -387,7 +387,7 @@ static void test_subnet_assign(void)
     uint8_t node_pub[AC_PUBKEY_LEN], node_priv[64];
     TEST("SUBNET_ASSIGN tracks membership");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     make_keypair(node_pub, node_priv);
     ac_genesis_block(&genesis);
@@ -419,7 +419,7 @@ static void test_subnet_assign_nonexistent(void)
     int rc;
     TEST("ASSIGN to nonexistent subnet rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     make_keypair(node_pub, node_priv);
     ac_genesis_block(&genesis);
@@ -442,7 +442,7 @@ static void test_subnet_assign_duplicate(void)
     int rc;
     TEST("duplicate ASSIGN rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     make_keypair(node_pub, node_priv);
     ac_genesis_block(&genesis);
@@ -472,7 +472,7 @@ static void test_subnet_rebuild(void)
     uint8_t node_pub[AC_PUBKEY_LEN], node_priv[64];
     TEST("rebuild from chain");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     make_keypair(node_pub, node_priv);
 
@@ -497,7 +497,7 @@ static void test_subnet_null_safety(void)
     int rc;
     TEST("NULL parameter safety (K01)");
 
-    rc = ac_subnet_init(NULL, 0, 0);
+    rc = ac_subnet_init(NULL, 0, 0, NULL);
     ASSERT_NE(rc, AC_OK, "init(NULL) should fail");
     ASSERT_EQ(ac_subnet_count(NULL), 0, "count(NULL) should be 0");
     ASSERT_EQ((uintptr_t)ac_subnet_find(NULL, NULL), (uintptr_t)NULL, "find(NULL) should be NULL");
@@ -513,7 +513,7 @@ static void test_subnet_gateway_outside_prefix(void)
     int rc;
     TEST("gateway outside prefix rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -566,7 +566,7 @@ static void test_subnet_empty_id_rejected(void)
     int rc;
     TEST("empty subnet_id rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -681,7 +681,7 @@ static void test_subnet_update_gateway(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("UPDATE gateway (UPD_GATEWAY)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -718,7 +718,7 @@ static void test_subnet_update_dns(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("UPDATE dns (UPD_DNS)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -754,7 +754,7 @@ static void test_subnet_update_vlan(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("UPDATE vlan_id (UPD_VLAN)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -788,7 +788,7 @@ static void test_subnet_update_prefix_no_overlap(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("UPDATE prefix no overlap (UPD_PREFIX)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -834,7 +834,7 @@ static void test_subnet_update_prefix_overlap_rejected(void)
     int rc;
     TEST("UPDATE prefix overlap rejected (N11)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -874,7 +874,7 @@ static void test_subnet_update_nonexistent(void)
     int rc;
     TEST("UPDATE nonexistent subnet rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -897,7 +897,7 @@ static void test_subnet_update_deleted_subnet(void)
     int rc;
     TEST("UPDATE deleted subnet rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -931,7 +931,7 @@ static void test_subnet_delete_empty(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("DELETE empty subnet");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -961,7 +961,7 @@ static void test_subnet_delete_nonexistent(void)
     int rc;
     TEST("DELETE nonexistent subnet rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -981,7 +981,7 @@ static void test_subnet_delete_already_deleted(void)
     int rc;
     TEST("DELETE already deleted subnet rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -1009,7 +1009,7 @@ static void test_subnet_recreate_after_delete(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("recreate after DELETE (S18)");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -1050,7 +1050,7 @@ static void test_subnet_update_delete_same_block_rejected(void)
     int rc;
     TEST("S16 UPDATE+DELETE same block rejected");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -1103,7 +1103,7 @@ static void test_subnet_rebuild_with_update_delete(void)
     uint8_t sid[AC_SUBNET_ID_LEN];
     TEST("rebuild with UPDATE and DELETE");
 
-    ac_subnet_init(&ss, 0, 0);
+    ac_subnet_init(&ss, 0, 0, NULL);
     make_keypair(pub, priv);
 
     /* Block 0: genesis */

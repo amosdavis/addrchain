@@ -13,6 +13,7 @@
 
 #include "ac_claims.h"
 #include "ac_crypto.h"
+#include "ac_dag.h"
 
 /* ================================================================== */
 /*  Internal helpers (caller holds lock)                               */
@@ -85,6 +86,9 @@ static void expire_leases(ac_claim_store_t *cs, uint32_t tip_index)
         if (tip_index > rec->last_renewed_block + ttl) {
             ac_log_info("claim expired: block %u + ttl %u < tip %u",
                         rec->last_renewed_block, ttl, tip_index);
+            /* DAG: remove expired claim node */
+            if (cs->dag)
+                ac_dag_remove_node(cs->dag, AC_RES_CLAIM, rec->address.addr);
             ac_hashmap_iter_remove(&it);
             ac_free(rec);
             cs->claim_count--;
@@ -134,6 +138,22 @@ static int apply_tx(ac_claim_store_t *cs,
             return AC_ERR_NOMEM;
         }
         cs->claim_count++;
+
+        /* DAG: register claim node and claim→subnet dependency edge */
+        if (cs->dag) {
+            ac_dag_add_node(cs->dag, AC_RES_CLAIM, cl->address.addr);
+            {
+                uint8_t zero_id[AC_SUBNET_ID_LEN];
+                memset(zero_id, 0, sizeof(zero_id));
+                if (memcmp(cl->subnet_id, zero_id, AC_SUBNET_ID_LEN) != 0) {
+                    uint8_t subnet_dag_id[AC_MAX_ADDR_LEN];
+                    memset(subnet_dag_id, 0, AC_MAX_ADDR_LEN);
+                    memcpy(subnet_dag_id, cl->subnet_id, AC_SUBNET_ID_LEN);
+                    ac_dag_add_edge(cs->dag, AC_RES_SUBNET, subnet_dag_id,
+                                    AC_RES_CLAIM, cl->address.addr);
+                }
+            }
+        }
         break;
     }
 
@@ -153,6 +173,9 @@ static int apply_tx(ac_claim_store_t *cs,
         rec = (ac_claim_record_t *)ac_hashmap_remove(&cs->claims_map,
                                                       key, AC_CLAIM_KEY_LEN);
         if (rec) {
+            /* DAG: remove claim node (edges pruned automatically) */
+            if (cs->dag)
+                ac_dag_remove_node(cs->dag, AC_RES_CLAIM, cl->address.addr);
             ac_free(rec);
             cs->claim_count--;
         }
@@ -227,7 +250,8 @@ static int apply_tx(ac_claim_store_t *cs,
 /*  Lifecycle                                                          */
 /* ================================================================== */
 
-int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims)
+int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims,
+                   ac_dag_t *dag)
 {
     int rc;
 
@@ -235,6 +259,7 @@ int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims
         return AC_ERR_INVAL;
 
     memset(cs, 0, sizeof(*cs));
+    cs->dag = dag;
 
     rc = ac_mutex_init(&cs->lock);
     if (rc != AC_OK)

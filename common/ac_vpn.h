@@ -14,6 +14,7 @@
 #include "ac_proto.h"
 #include "ac_platform.h"
 #include "ac_hashmap.h"
+#include "ac_dag.h"
 
 /* ------------------------------------------------------------------ */
 /*  Limits                                                             */
@@ -76,13 +77,14 @@ typedef struct {
     ac_hashmap_t    tunnel_map;
     uint32_t        max_tunnels;
     ac_mutex_t      lock;
+    ac_dag_t       *dag;            /* optional DAG for dependency tracking */
 } ac_vpn_store_t;
 
 /* ------------------------------------------------------------------ */
 /*  API                                                                */
 /* ------------------------------------------------------------------ */
 
-int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels);
+int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels, ac_dag_t *dag);
 void ac_vpn_destroy(ac_vpn_store_t *vs);
 
 /*

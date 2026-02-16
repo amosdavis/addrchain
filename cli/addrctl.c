@@ -414,10 +414,10 @@ int main(int argc, char *argv[])
 
     /* Initialize subsystems */
     ac_chain_init(&g_chain);
-    ac_claims_init(&g_claims, AC_DEFAULT_LEASE_BLOCKS, 0);
-    ac_subnet_init(&g_subnets, 0, 0);
-    ac_partition_init(&g_parts, 0, 0);
-    ac_vpn_init(&g_vpns, 0);
+    ac_claims_init(&g_claims, AC_DEFAULT_LEASE_BLOCKS, 0, NULL);
+    ac_subnet_init(&g_subnets, 0, 0, NULL);
+    ac_partition_init(&g_parts, 0, 0, NULL);
+    ac_vpn_init(&g_vpns, 0, NULL);
     ac_discover_init(&g_disc, g_pubkey, AC_SYNC_PORT,
                      AC_DISC_IPV4_BCAST, 0);
 

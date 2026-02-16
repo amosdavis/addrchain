@@ -14,6 +14,7 @@
 #include "ac_proto.h"
 #include "ac_platform.h"
 #include "ac_hashmap.h"
+#include "ac_dag.h"
 
 /* ------------------------------------------------------------------ */
 /*  Subnet record                                                      */
@@ -56,6 +57,7 @@ typedef struct {
     uint32_t            max_members;
 
     ac_mutex_t          lock;
+    ac_dag_t           *dag;            /* optional DAG for dependency tracking */
 } ac_subnet_store_t;
 
 /* ------------------------------------------------------------------ */
@@ -68,7 +70,8 @@ typedef struct {
  * Returns AC_OK on success.
  */
 int ac_subnet_init(ac_subnet_store_t *ss,
-                   uint32_t max_subnets, uint32_t max_members);
+                   uint32_t max_subnets, uint32_t max_members,
+                   ac_dag_t *dag);
 
 /*
  * ac_subnet_destroy — Free subnet store resources.
