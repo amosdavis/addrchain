@@ -1020,3 +1020,41 @@ int ac_chain_get_blocks(ac_chain_t *chain,
     ac_mutex_unlock(&chain->lock);
     return AC_OK;
 }
+
+/* ================================================================== */
+/*  Chain pruning (S24: daemon-only)                                   */
+/* ================================================================== */
+
+int ac_chain_prune(ac_chain_t *chain, uint32_t keep_from)
+{
+    uint32_t removed;
+
+    if (!chain)
+        return 0;
+
+    ac_mutex_lock(&chain->lock);
+
+    if (keep_from == 0 || keep_from >= chain->count) {
+        ac_mutex_unlock(&chain->lock);
+        return 0;
+    }
+
+    removed = keep_from;
+
+    /* Shift remaining blocks to the front */
+    memmove(chain->blocks,
+            chain->blocks + keep_from,
+            (size_t)(chain->count - keep_from) * sizeof(ac_block_t));
+
+    /* Zeroize freed tail slots (K04: clear sensitive data) */
+    ac_crypto_zeroize(chain->blocks + (chain->count - keep_from),
+                      (size_t)keep_from * sizeof(ac_block_t));
+
+    chain->count -= keep_from;
+
+    ac_mutex_unlock(&chain->lock);
+
+    ac_log_info("chain pruned: removed %u blocks, %u remaining",
+                removed, chain->count);
+    return (int)removed;
+}

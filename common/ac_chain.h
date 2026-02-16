@@ -169,6 +169,10 @@ int ac_chain_get_blocks(ac_chain_t *chain,
                         ac_block_t *out, uint32_t out_capacity,
                         uint32_t *out_count);
 
+/* Prune blocks before keep_from. Returns number of blocks removed.
+ * Shifts remaining blocks and adjusts count. Daemon-only. */
+int ac_chain_prune(ac_chain_t *chain, uint32_t keep_from);
+
 /* ------------------------------------------------------------------ */
 /*  Clock sanity check (N30 hardened)                                  */
 /* ------------------------------------------------------------------ */
