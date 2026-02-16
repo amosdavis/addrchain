@@ -87,6 +87,8 @@ typedef enum {
     AC_TX_REVOKE        = 0x04,
     AC_TX_SUBNET_CREATE = 0x10,
     AC_TX_SUBNET_ASSIGN = 0x11,
+    AC_TX_SUBNET_UPDATE = 0x12,
+    AC_TX_SUBNET_DELETE = 0x13,
     AC_TX_VPN_TUNNEL    = 0x20,
     AC_TX_VPN_KEY       = 0x21,
     AC_TX_PARTITION     = 0x30,
@@ -121,6 +123,16 @@ typedef enum {
 
 #define AC_SUBNET_FLAG_NO_GATEWAY   0x01    /* explicit --no-gateway   */
 #define AC_SUBNET_FLAG_NO_DNS       0x02    /* explicit --no-dns       */
+
+/* ------------------------------------------------------------------ */
+/*  SUBNET_UPDATE field bitmask                                        */
+/* ------------------------------------------------------------------ */
+
+#define AC_SUBNET_UPD_GATEWAY   0x01    /* gateway field changed   */
+#define AC_SUBNET_UPD_DNS       0x02    /* dns/dns_count changed   */
+#define AC_SUBNET_UPD_VLAN      0x04    /* vlan_id changed         */
+#define AC_SUBNET_UPD_FLAGS     0x08    /* flags changed           */
+#define AC_SUBNET_UPD_PREFIX    0x10    /* prefix changed (risky)  */
 
 /* ------------------------------------------------------------------ */
 /*  Packed structs — wire format                                       */
@@ -168,6 +180,23 @@ typedef struct {
     uint8_t     node_pubkey[AC_PUBKEY_LEN];
 } ac_tx_subnet_assign_t;
 
+/* SUBNET_UPDATE: modify an existing subnet (S03, S12, S16) */
+typedef struct {
+    uint8_t         subnet_id[AC_SUBNET_ID_LEN];
+    uint8_t         update_mask;            /* AC_SUBNET_UPD_* bitmask */
+    ac_address_t    prefix;                 /* new prefix (if UPD_PREFIX)  */
+    ac_address_t    gateway;                /* new gateway (if UPD_GATEWAY)*/
+    ac_address_t    dns[AC_MAX_DNS_ADDRS];  /* new DNS (if UPD_DNS)       */
+    uint8_t         dns_count;
+    uint16_t        vlan_id;                /* new VLAN (if UPD_VLAN)     */
+    uint8_t         flags;                  /* new flags (if UPD_FLAGS)   */
+} ac_tx_subnet_update_t;
+
+/* SUBNET_DELETE: soft-delete a subnet (S04, S16, S18) */
+typedef struct {
+    uint8_t         subnet_id[AC_SUBNET_ID_LEN];
+} ac_tx_subnet_delete_t;
+
 /* VPN_TUNNEL: register a VPN tunnel endpoint */
 typedef struct {
     uint8_t         vpn_proto;              /* ac_vpn_proto_t          */
@@ -213,6 +242,8 @@ typedef struct {
         ac_tx_revoke_t          revoke;
         ac_tx_subnet_create_t   subnet_create;
         ac_tx_subnet_assign_t   subnet_assign;
+        ac_tx_subnet_update_t   subnet_update;
+        ac_tx_subnet_delete_t   subnet_delete;
         ac_tx_vpn_tunnel_t      vpn_tunnel;
         ac_tx_vpn_key_t         vpn_key;
         ac_tx_partition_t       partition;
@@ -268,6 +299,8 @@ static inline const char *ac_tx_type_name(uint8_t type)
     case AC_TX_REVOKE:          return "REVOKE";
     case AC_TX_SUBNET_CREATE:   return "SUBNET_CREATE";
     case AC_TX_SUBNET_ASSIGN:   return "SUBNET_ASSIGN";
+    case AC_TX_SUBNET_UPDATE:   return "SUBNET_UPDATE";
+    case AC_TX_SUBNET_DELETE:   return "SUBNET_DELETE";
     case AC_TX_VPN_TUNNEL:      return "VPN_TUNNEL";
     case AC_TX_VPN_KEY:         return "VPN_KEY";
     case AC_TX_PARTITION:       return "PARTITION";

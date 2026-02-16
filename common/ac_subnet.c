@@ -1,12 +1,12 @@
 /*
  * ac_subnet.c — Subnet management implementation (dynamic hashmap-backed)
  *
- * Manages SUBNET_CREATE / SUBNET_ASSIGN transactions. Validates prefix
- * membership, detects overlapping subnets, enforces gateway/DNS requirements,
- * and tracks node-to-subnet assignments.
+ * Manages SUBNET_CREATE / SUBNET_ASSIGN / SUBNET_UPDATE / SUBNET_DELETE
+ * transactions. Validates prefix membership, detects overlapping subnets,
+ * enforces gateway/DNS requirements, and tracks node-to-subnet assignments.
  * Backed by ac_hashmap_t for unlimited scaling.
  *
- * Mitigates: N02,N05,N11,N12,N13,N14,N15,N20,N29,N31,S01,S15
+ * Mitigates: N02,N05,N11,N12,N13,N14,N15,N20,N29,N31,S01,S03,S04,S15,S16,S18
  */
 
 #include "ac_subnet.h"
@@ -276,6 +276,207 @@ static int apply_subnet_assign(ac_subnet_store_t *ss,
     return AC_OK;
 }
 
+/* Validate a SUBNET_UPDATE transaction (caller holds lock). */
+static int validate_subnet_update(ac_subnet_store_t *ss,
+                                  const ac_tx_subnet_update_t *su)
+{
+    ac_subnet_record_t *subnet;
+    const ac_address_t *effective_prefix;
+    uint8_t effective_flags;
+
+    subnet = find_subnet(ss, su->subnet_id);
+    if (!subnet || !subnet->active) {
+        ac_log(AC_LOG_WARN, "validate: subnet_id not found for UPDATE");
+        return AC_ERR_NOENT;
+    }
+
+    /* Determine effective prefix and flags after update */
+    effective_prefix = (su->update_mask & AC_SUBNET_UPD_PREFIX)
+                       ? &su->prefix : &subnet->prefix;
+    effective_flags  = (su->update_mask & AC_SUBNET_UPD_FLAGS)
+                       ? su->flags : subnet->flags;
+
+    /* UPD_PREFIX: validate new prefix and check overlap (N11) */
+    if (su->update_mask & AC_SUBNET_UPD_PREFIX) {
+        uint16_t max_bits = addr_max_bits(su->prefix.family);
+        ac_hashmap_iter_t it;
+        const void *k;
+        uint32_t kl;
+        void *v;
+
+        if (max_bits == 0) {
+            ac_log(AC_LOG_WARN, "validate: invalid prefix family in UPDATE");
+            return AC_ERR_INVAL;
+        }
+        if (su->prefix.prefix_len > max_bits) {
+            ac_log(AC_LOG_WARN, "validate: prefix_len exceeds max in UPDATE");
+            return AC_ERR_INVAL;
+        }
+
+        /* Check overlap against other active subnets (skip self) */
+        ac_hashmap_iter_init(&it, &ss->subnet_map);
+        while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+            ac_subnet_record_t *rec = (ac_subnet_record_t *)v;
+            if (rec == subnet)
+                continue;
+            if (rec->active && prefixes_overlap(&rec->prefix, &su->prefix)) {
+                ac_log(AC_LOG_WARN, "validate: updated prefix overlaps existing subnet");
+                return AC_ERR_OVERLAP;
+            }
+        }
+
+        /*
+         * TODO (Stage 2): verify all existing claims in this subnet still
+         * fall within the new prefix via ac_dag_dependents() query.
+         */
+    }
+
+    /* UPD_GATEWAY: gateway must be within effective prefix unless NO_GATEWAY */
+    if (su->update_mask & AC_SUBNET_UPD_GATEWAY) {
+        if (!(effective_flags & AC_SUBNET_FLAG_NO_GATEWAY)) {
+            ac_address_t zero;
+            memset(&zero, 0, sizeof(zero));
+            if (memcmp(&su->gateway, &zero, sizeof(zero)) == 0) {
+                ac_log(AC_LOG_WARN, "validate: UPDATE gateway required (use --no-gateway)");
+                return AC_ERR_INVAL;
+            }
+            if (!prefix_match(effective_prefix, &su->gateway)) {
+                ac_log(AC_LOG_WARN, "validate: UPDATE gateway not within prefix");
+                return AC_ERR_INVAL;
+            }
+        }
+    }
+
+    /* UPD_DNS: validate dns_count unless NO_DNS */
+    if (su->update_mask & AC_SUBNET_UPD_DNS) {
+        if (!(effective_flags & AC_SUBNET_FLAG_NO_DNS)) {
+            if (su->dns_count == 0) {
+                ac_log(AC_LOG_WARN, "validate: UPDATE dns required (use --no-dns)");
+                return AC_ERR_INVAL;
+            }
+            if (su->dns_count > AC_MAX_DNS_ADDRS) {
+                ac_log(AC_LOG_WARN, "validate: UPDATE too many DNS servers");
+                return AC_ERR_INVAL;
+            }
+        }
+    }
+
+    return AC_OK;
+}
+
+/* Apply a SUBNET_UPDATE (caller holds lock). */
+static int apply_subnet_update(ac_subnet_store_t *ss,
+                                const ac_tx_subnet_update_t *su)
+{
+    ac_subnet_record_t *rec;
+
+    rec = find_subnet(ss, su->subnet_id);
+    if (!rec)
+        return AC_ERR_NOENT;
+
+    if (su->update_mask & AC_SUBNET_UPD_PREFIX)
+        rec->prefix = su->prefix;
+
+    if (su->update_mask & AC_SUBNET_UPD_GATEWAY)
+        rec->gateway = su->gateway;
+
+    if (su->update_mask & AC_SUBNET_UPD_DNS) {
+        memcpy(rec->dns, su->dns, sizeof(su->dns));
+        rec->dns_count = su->dns_count;
+    }
+
+    if (su->update_mask & AC_SUBNET_UPD_VLAN)
+        rec->vlan_id = su->vlan_id;
+
+    if (su->update_mask & AC_SUBNET_UPD_FLAGS)
+        rec->flags = su->flags;
+
+    ac_log(AC_LOG_INFO, "subnet updated: %.31s (mask=0x%02x)",
+           su->subnet_id, su->update_mask);
+    return AC_OK;
+}
+
+/* Validate a SUBNET_DELETE transaction (caller holds lock). */
+static int validate_subnet_delete(ac_subnet_store_t *ss,
+                                  const ac_tx_subnet_delete_t *sd)
+{
+    ac_subnet_record_t *subnet;
+
+    subnet = find_subnet(ss, sd->subnet_id);
+    if (!subnet || !subnet->active) {
+        ac_log(AC_LOG_WARN, "validate: subnet_id not found for DELETE");
+        return AC_ERR_NOENT;
+    }
+
+    /*
+     * TODO (Stage 2): replace with ac_dag_dependents() query to check
+     * that no active claims reference this subnet before deletion.
+     */
+
+    return AC_OK;
+}
+
+/* Apply a SUBNET_DELETE — soft-delete (S18) (caller holds lock). */
+static int apply_subnet_delete(ac_subnet_store_t *ss,
+                                const ac_tx_subnet_delete_t *sd)
+{
+    ac_subnet_record_t *rec;
+
+    rec = find_subnet(ss, sd->subnet_id);
+    if (!rec)
+        return AC_ERR_NOENT;
+
+    rec->active = 0;
+    if (ss->subnet_count > 0)
+        ss->subnet_count--;
+
+    ac_log(AC_LOG_INFO, "subnet deleted: %.31s", sd->subnet_id);
+    return AC_OK;
+}
+
+/*
+ * S16 mitigation: detect conflicting UPDATE+DELETE for the same subnet_id
+ * within a single block. Returns AC_ERR_CONFLICT if found.
+ */
+static int check_update_delete_conflict(const ac_block_t *blk)
+{
+    uint16_t i, j;
+
+    for (i = 0; i < blk->tx_count; i++) {
+        const ac_transaction_t *ti = &blk->txs[i];
+
+        if (ti->type != AC_TX_SUBNET_UPDATE && ti->type != AC_TX_SUBNET_DELETE)
+            continue;
+
+        for (j = i + 1; j < blk->tx_count; j++) {
+            const ac_transaction_t *tj = &blk->txs[j];
+            const uint8_t *id_i = NULL;
+            const uint8_t *id_j = NULL;
+
+            if (ti->type == AC_TX_SUBNET_UPDATE)
+                id_i = ti->payload.subnet_update.subnet_id;
+            else
+                id_i = ti->payload.subnet_delete.subnet_id;
+
+            if (tj->type == AC_TX_SUBNET_UPDATE)
+                id_j = tj->payload.subnet_update.subnet_id;
+            else if (tj->type == AC_TX_SUBNET_DELETE)
+                id_j = tj->payload.subnet_delete.subnet_id;
+            else
+                continue;
+
+            if (memcmp(id_i, id_j, AC_SUBNET_ID_LEN) == 0 &&
+                ((ti->type == AC_TX_SUBNET_UPDATE && tj->type == AC_TX_SUBNET_DELETE) ||
+                 (ti->type == AC_TX_SUBNET_DELETE && tj->type == AC_TX_SUBNET_UPDATE))) {
+                ac_log(AC_LOG_WARN, "validate: S16 conflict — UPDATE+DELETE for same subnet in block");
+                return AC_ERR_CONFLICT;
+            }
+        }
+    }
+
+    return AC_OK;
+}
+
 /* ================================================================== */
 /*  Public API                                                         */
 /* ================================================================== */
@@ -365,6 +566,11 @@ int ac_subnet_validate_block(ac_subnet_store_t *ss,
     if (!ss || !blk)
         return AC_ERR_INVAL;
 
+    /* S16: reject blocks with both UPDATE and DELETE for the same subnet */
+    rc = check_update_delete_conflict(blk);
+    if (rc != AC_OK)
+        return rc;
+
     ac_mutex_lock(&ss->lock);
 
     for (i = 0; i < blk->tx_count; i++) {
@@ -382,6 +588,22 @@ int ac_subnet_validate_block(ac_subnet_store_t *ss,
 
         case AC_TX_SUBNET_ASSIGN:
             rc = validate_subnet_assign(ss, &tx->payload.subnet_assign);
+            if (rc != AC_OK) {
+                ac_mutex_unlock(&ss->lock);
+                return rc;
+            }
+            break;
+
+        case AC_TX_SUBNET_UPDATE:
+            rc = validate_subnet_update(ss, &tx->payload.subnet_update);
+            if (rc != AC_OK) {
+                ac_mutex_unlock(&ss->lock);
+                return rc;
+            }
+            break;
+
+        case AC_TX_SUBNET_DELETE:
+            rc = validate_subnet_delete(ss, &tx->payload.subnet_delete);
             if (rc != AC_OK) {
                 ac_mutex_unlock(&ss->lock);
                 return rc;
@@ -425,6 +647,20 @@ int ac_subnet_apply_block(ac_subnet_store_t *ss,
                                      blk->index);
             if (rc != AC_OK) {
                 ac_log(AC_LOG_WARN, "apply: subnet assign failed: %d", rc);
+            }
+            break;
+
+        case AC_TX_SUBNET_UPDATE:
+            rc = apply_subnet_update(ss, &tx->payload.subnet_update);
+            if (rc != AC_OK) {
+                ac_log(AC_LOG_WARN, "apply: subnet update failed: %d", rc);
+            }
+            break;
+
+        case AC_TX_SUBNET_DELETE:
+            rc = apply_subnet_delete(ss, &tx->payload.subnet_delete);
+            if (rc != AC_OK) {
+                ac_log(AC_LOG_WARN, "apply: subnet delete failed: %d", rc);
             }
             break;
 
@@ -540,6 +776,14 @@ int ac_subnet_rebuild(ac_subnet_store_t *ss,
             case AC_TX_SUBNET_ASSIGN:
                 apply_subnet_assign(ss, &tx->payload.subnet_assign,
                                     blk->index);
+                break;
+
+            case AC_TX_SUBNET_UPDATE:
+                apply_subnet_update(ss, &tx->payload.subnet_update);
+                break;
+
+            case AC_TX_SUBNET_DELETE:
+                apply_subnet_delete(ss, &tx->payload.subnet_delete);
                 break;
 
             default:
