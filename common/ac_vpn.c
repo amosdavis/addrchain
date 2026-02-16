@@ -20,60 +20,45 @@
 
 #include <string.h>
 
+/* Composite key: remote_pubkey[AC_PUBKEY_LEN] || vpn_proto[1] */
+#define AC_VPN_KEY_LEN  (AC_PUBKEY_LEN + 1)
+
 /* ================================================================== */
 /*  Internal helpers                                                   */
 /* ================================================================== */
 
-static int find_by_remote(const ac_vpn_store_t *vs,
-                          const uint8_t remote[AC_PUBKEY_LEN])
+static void make_tunnel_key(uint8_t key[AC_VPN_KEY_LEN],
+                            const uint8_t remote[AC_PUBKEY_LEN],
+                            uint8_t proto)
 {
-    uint32_t i;
-    for (i = 0; i < vs->tunnel_count; i++) {
-        if (vs->tunnels[i].active &&
-            memcmp(vs->tunnels[i].remote_pubkey, remote, AC_PUBKEY_LEN) == 0)
-            return (int)i;
-    }
-    return -1;
+    memcpy(key, remote, AC_PUBKEY_LEN);
+    key[AC_PUBKEY_LEN] = proto;
 }
 
-static int find_by_remote_proto(const ac_vpn_store_t *vs,
-                                const uint8_t remote[AC_PUBKEY_LEN],
-                                uint8_t proto)
+static ac_vpn_tunnel_t *find_by_remote(ac_vpn_store_t *vs,
+                                       const uint8_t remote[AC_PUBKEY_LEN])
 {
-    uint32_t i;
-    for (i = 0; i < vs->tunnel_count; i++) {
-        if (vs->tunnels[i].active &&
-            vs->tunnels[i].vpn_proto == proto &&
-            memcmp(vs->tunnels[i].remote_pubkey, remote, AC_PUBKEY_LEN) == 0)
-            return (int)i;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
+    ac_hashmap_iter_init(&it, &vs->tunnel_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_vpn_tunnel_t *tun = (ac_vpn_tunnel_t *)v;
+        if (memcmp(tun->remote_pubkey, remote, AC_PUBKEY_LEN) == 0)
+            return tun;
     }
-    return -1;
+    return NULL;
 }
 
-/* Find a free slot or evict a CLOSED tunnel */
-static int alloc_slot(ac_vpn_store_t *vs)
+static ac_vpn_tunnel_t *find_by_remote_proto(ac_vpn_store_t *vs,
+                                             const uint8_t remote[AC_PUBKEY_LEN],
+                                             uint8_t proto)
 {
-    uint32_t i;
-
-    /* Reuse inactive slot */
-    for (i = 0; i < vs->tunnel_count; i++) {
-        if (!vs->tunnels[i].active)
-            return (int)i;
-    }
-
-    /* Reuse a CLOSED slot */
-    for (i = 0; i < vs->tunnel_count; i++) {
-        if (vs->tunnels[i].state == AC_VPN_STATE_CLOSED) {
-            memset(&vs->tunnels[i], 0, sizeof(vs->tunnels[i]));
-            return (int)i;
-        }
-    }
-
-    /* Append */
-    if (vs->tunnel_count < AC_MAX_VPN_TUNNELS)
-        return (int)vs->tunnel_count++;
-
-    return -1;
+    uint8_t key[AC_VPN_KEY_LEN];
+    make_tunnel_key(key, remote, proto);
+    return (ac_vpn_tunnel_t *)ac_hashmap_get(&vs->tunnel_map, key, AC_VPN_KEY_LEN);
 }
 
 /* Validate state transition */
@@ -127,16 +112,10 @@ static int validate_vpn_key(const ac_vpn_store_t *vs,
     }
 
     /* Check capacity */
-    {
-        uint32_t active = 0, i;
-        for (i = 0; i < vs->tunnel_count; i++) {
-            if (vs->tunnels[i].active)
-                active++;
-        }
-        if (active >= AC_MAX_VPN_TUNNELS) {
-            ac_log(AC_LOG_WARN, "vpn: tunnel table full");
-            return AC_ERR_NOMEM;
-        }
+    if (vs->max_tunnels > 0 &&
+        ac_hashmap_count(&vs->tunnel_map) >= vs->max_tunnels) {
+        ac_log(AC_LOG_WARN, "vpn: tunnel table full");
+        return AC_ERR_NOMEM;
     }
 
     return AC_OK;
@@ -194,14 +173,12 @@ static void apply_vpn_key(ac_vpn_store_t *vs,
                           const uint8_t node_pubkey[AC_PUBKEY_LEN],
                           uint32_t block_index)
 {
-    int idx;
     ac_vpn_tunnel_t *tun;
 
     /* Check if tunnel for this node+proto already exists */
-    idx = find_by_remote_proto(vs, node_pubkey, vk->vpn_proto);
-    if (idx >= 0) {
+    tun = find_by_remote_proto(vs, node_pubkey, vk->vpn_proto);
+    if (tun) {
         /* Update VPN pubkey (rekey) */
-        tun = &vs->tunnels[idx];
         memcpy(tun->vpn_pubkey, vk->vpn_pubkey, AC_PUBKEY_LEN);
         if (tun->state == AC_VPN_STATE_ACTIVE)
             tun->state = AC_VPN_STATE_REKEYING;
@@ -211,14 +188,12 @@ static void apply_vpn_key(ac_vpn_store_t *vs,
     }
 
     /* Create new tunnel record */
-    idx = alloc_slot(vs);
-    if (idx < 0) {
-        ac_log(AC_LOG_WARN, "vpn: no slot for new tunnel");
+    tun = (ac_vpn_tunnel_t *)ac_zalloc(sizeof(*tun), AC_MEM_NORMAL);
+    if (!tun) {
+        ac_log(AC_LOG_WARN, "vpn: no memory for new tunnel");
         return;
     }
 
-    tun = &vs->tunnels[idx];
-    memset(tun, 0, sizeof(*tun));
     memcpy(tun->remote_pubkey, node_pubkey, AC_PUBKEY_LEN);
     tun->vpn_proto = vk->vpn_proto;
     memcpy(tun->vpn_pubkey, vk->vpn_pubkey, AC_PUBKEY_LEN);
@@ -226,6 +201,17 @@ static void apply_vpn_key(ac_vpn_store_t *vs,
     tun->created_at = ac_time_unix_sec();
     tun->block_registered = block_index;
     tun->active = 1;
+
+    {
+        uint8_t key[AC_VPN_KEY_LEN];
+        make_tunnel_key(key, node_pubkey, vk->vpn_proto);
+        if (ac_hashmap_put(&vs->tunnel_map, key, AC_VPN_KEY_LEN,
+                           tun, NULL) != AC_OK) {
+            ac_free(tun);
+            ac_log(AC_LOG_WARN, "vpn: hashmap put failed");
+            return;
+        }
+    }
 
     ac_log(AC_LOG_INFO, "vpn: new tunnel registered (proto=%u, state=KEYED)",
            vk->vpn_proto);
@@ -236,26 +222,32 @@ static void apply_vpn_tunnel(ac_vpn_store_t *vs,
                              const uint8_t node_pubkey[AC_PUBKEY_LEN],
                              uint32_t block_index)
 {
-    int idx;
     ac_vpn_tunnel_t *tun;
 
-    idx = find_by_remote_proto(vs, node_pubkey, vt->vpn_proto);
-    if (idx >= 0) {
-        /* Update existing tunnel parameters */
-        tun = &vs->tunnels[idx];
-    } else {
+    tun = find_by_remote_proto(vs, node_pubkey, vt->vpn_proto);
+    if (!tun) {
         /* Create new record if no VPN_KEY was seen first */
-        idx = alloc_slot(vs);
-        if (idx < 0) {
-            ac_log(AC_LOG_WARN, "vpn: no slot for tunnel");
+        tun = (ac_vpn_tunnel_t *)ac_zalloc(sizeof(*tun), AC_MEM_NORMAL);
+        if (!tun) {
+            ac_log(AC_LOG_WARN, "vpn: no memory for tunnel");
             return;
         }
-        tun = &vs->tunnels[idx];
-        memset(tun, 0, sizeof(*tun));
+
         memcpy(tun->remote_pubkey, node_pubkey, AC_PUBKEY_LEN);
         tun->created_at = ac_time_unix_sec();
         tun->block_registered = block_index;
         tun->active = 1;
+
+        {
+            uint8_t key[AC_VPN_KEY_LEN];
+            make_tunnel_key(key, node_pubkey, vt->vpn_proto);
+            if (ac_hashmap_put(&vs->tunnel_map, key, AC_VPN_KEY_LEN,
+                               tun, NULL) != AC_OK) {
+                ac_free(tun);
+                ac_log(AC_LOG_WARN, "vpn: hashmap put failed");
+                return;
+            }
+        }
     }
 
     tun->vpn_proto = vt->vpn_proto;
@@ -281,29 +273,48 @@ static void apply_vpn_tunnel(ac_vpn_store_t *vs,
 /*  Public API                                                         */
 /* ================================================================== */
 
-int ac_vpn_init(ac_vpn_store_t *vs)
+int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels)
 {
+    int rc;
+
     if (!vs)
         return AC_ERR_INVAL;
 
     memset(vs, 0, sizeof(*vs));
-    ac_mutex_init(&vs->lock);
+    vs->max_tunnels = max_tunnels;
+
+    rc = ac_mutex_init(&vs->lock);
+    if (rc != AC_OK)
+        return rc;
+
+    rc = ac_hashmap_init(&vs->tunnel_map, 64, max_tunnels);
+    if (rc != AC_OK) {
+        ac_mutex_destroy(&vs->lock);
+        return rc;
+    }
+
     ac_log(AC_LOG_INFO, "vpn store initialized");
     return AC_OK;
 }
 
 void ac_vpn_destroy(ac_vpn_store_t *vs)
 {
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
     if (!vs)
         return;
 
-    /* Zeroize VPN keys (K20) */
-    {
-        uint32_t i;
-        for (i = 0; i < vs->tunnel_count; i++) {
-            ac_crypto_zeroize(vs->tunnels[i].vpn_pubkey, AC_PUBKEY_LEN);
-        }
+    /* Zeroize VPN keys and free records (K20) */
+    ac_hashmap_iter_init(&it, &vs->tunnel_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_vpn_tunnel_t *tun = (ac_vpn_tunnel_t *)v;
+        ac_crypto_zeroize(tun->vpn_pubkey, AC_PUBKEY_LEN);
+        ac_free(tun);
     }
+    ac_hashmap_destroy(&vs->tunnel_map);
 
     ac_mutex_destroy(&vs->lock);
     memset(vs, 0, sizeof(*vs));
@@ -384,11 +395,21 @@ int ac_vpn_apply_block(ac_vpn_store_t *vs, const ac_block_t *blk)
 const ac_vpn_tunnel_t *ac_vpn_find(const ac_vpn_store_t *vs,
                                     const uint8_t remote_pubkey[AC_PUBKEY_LEN])
 {
-    int idx;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
     if (!vs || !remote_pubkey)
         return NULL;
-    idx = find_by_remote(vs, remote_pubkey);
-    return idx >= 0 ? &vs->tunnels[idx] : NULL;
+
+    ac_hashmap_iter_init(&it, (ac_hashmap_t *)&vs->tunnel_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_vpn_tunnel_t *tun = (ac_vpn_tunnel_t *)v;
+        if (memcmp(tun->remote_pubkey, remote_pubkey, AC_PUBKEY_LEN) == 0)
+            return tun;
+    }
+    return NULL;
 }
 
 const ac_vpn_tunnel_t *ac_vpn_find_by_proto(
@@ -396,40 +417,48 @@ const ac_vpn_tunnel_t *ac_vpn_find_by_proto(
     const uint8_t remote_pubkey[AC_PUBKEY_LEN],
     uint8_t vpn_proto)
 {
-    int idx;
+    uint8_t key[AC_VPN_KEY_LEN];
+
     if (!vs || !remote_pubkey)
         return NULL;
-    idx = find_by_remote_proto(vs, remote_pubkey, vpn_proto);
-    return idx >= 0 ? &vs->tunnels[idx] : NULL;
+
+    make_tunnel_key(key, remote_pubkey, vpn_proto);
+    return (const ac_vpn_tunnel_t *)ac_hashmap_get(
+        &vs->tunnel_map, key, AC_VPN_KEY_LEN);
 }
 
 int ac_vpn_transition(ac_vpn_store_t *vs,
                       const uint8_t remote_pubkey[AC_PUBKEY_LEN],
                       ac_vpn_state_t new_state)
 {
-    int idx;
+    ac_vpn_tunnel_t *tun;
 
     if (!vs || !remote_pubkey)
         return AC_ERR_INVAL;
 
     ac_mutex_lock(&vs->lock);
 
-    idx = find_by_remote(vs, remote_pubkey);
-    if (idx < 0) {
+    tun = find_by_remote(vs, remote_pubkey);
+    if (!tun) {
         ac_mutex_unlock(&vs->lock);
         return AC_ERR_NOENT;
     }
 
-    if (!valid_transition(vs->tunnels[idx].state, new_state)) {
+    if (!valid_transition(tun->state, new_state)) {
         ac_log(AC_LOG_WARN, "vpn: invalid transition %u → %u",
-               vs->tunnels[idx].state, new_state);
+               tun->state, new_state);
         ac_mutex_unlock(&vs->lock);
         return AC_ERR_INVAL;
     }
 
-    vs->tunnels[idx].state = new_state;
-    if (new_state == AC_VPN_STATE_CLOSED)
-        vs->tunnels[idx].active = 0;
+    tun->state = new_state;
+    if (new_state == AC_VPN_STATE_CLOSED) {
+        uint8_t key[AC_VPN_KEY_LEN];
+        tun->active = 0;
+        make_tunnel_key(key, tun->remote_pubkey, tun->vpn_proto);
+        ac_hashmap_remove(&vs->tunnel_map, key, AC_VPN_KEY_LEN);
+        ac_free(tun);
+    }
 
     ac_mutex_unlock(&vs->lock);
     return AC_OK;
@@ -439,19 +468,19 @@ void ac_vpn_mark_handshake(ac_vpn_store_t *vs,
                            const uint8_t remote_pubkey[AC_PUBKEY_LEN],
                            uint64_t now)
 {
-    int idx;
+    ac_vpn_tunnel_t *tun;
 
     if (!vs || !remote_pubkey)
         return;
 
     ac_mutex_lock(&vs->lock);
-    idx = find_by_remote(vs, remote_pubkey);
-    if (idx >= 0) {
-        vs->tunnels[idx].last_handshake = now;
-        vs->tunnels[idx].rekey_attempts = 0;
-        if (vs->tunnels[idx].state == AC_VPN_STATE_KEYED ||
-            vs->tunnels[idx].state == AC_VPN_STATE_REKEYING)
-            vs->tunnels[idx].state = AC_VPN_STATE_ACTIVE;
+    tun = find_by_remote(vs, remote_pubkey);
+    if (tun) {
+        tun->last_handshake = now;
+        tun->rekey_attempts = 0;
+        if (tun->state == AC_VPN_STATE_KEYED ||
+            tun->state == AC_VPN_STATE_REKEYING)
+            tun->state = AC_VPN_STATE_ACTIVE;
     }
     ac_mutex_unlock(&vs->lock);
 }
@@ -460,33 +489,36 @@ void ac_vpn_update_traffic(ac_vpn_store_t *vs,
                            const uint8_t remote_pubkey[AC_PUBKEY_LEN],
                            uint64_t tx_bytes, uint64_t rx_bytes)
 {
-    int idx;
+    ac_vpn_tunnel_t *tun;
 
     if (!vs || !remote_pubkey)
         return;
 
     ac_mutex_lock(&vs->lock);
-    idx = find_by_remote(vs, remote_pubkey);
-    if (idx >= 0) {
-        vs->tunnels[idx].bytes_tx += tx_bytes;
-        vs->tunnels[idx].bytes_rx += rx_bytes;
+    tun = find_by_remote(vs, remote_pubkey);
+    if (tun) {
+        tun->bytes_tx += tx_bytes;
+        tun->bytes_rx += rx_bytes;
     }
     ac_mutex_unlock(&vs->lock);
 }
 
 void ac_vpn_prune_stale(ac_vpn_store_t *vs, uint64_t now)
 {
-    uint32_t i;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
 
     if (!vs)
         return;
 
     ac_mutex_lock(&vs->lock);
 
-    for (i = 0; i < vs->tunnel_count; i++) {
-        ac_vpn_tunnel_t *tun = &vs->tunnels[i];
-        if (!tun->active)
-            continue;
+    ac_hashmap_iter_init(&it, &vs->tunnel_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_vpn_tunnel_t *tun = (ac_vpn_tunnel_t *)v;
+
         if (tun->state == AC_VPN_STATE_CLOSED)
             continue;
 
@@ -498,6 +530,9 @@ void ac_vpn_prune_stale(ac_vpn_store_t *vs, uint64_t now)
             ac_log(AC_LOG_WARN, "vpn: tunnel handshake timeout, closing");
             tun->state = AC_VPN_STATE_CLOSED;
             tun->active = 0;
+            ac_hashmap_iter_remove(&it);
+            ac_free(tun);
+            continue;
         }
 
         /* Check rekey failure limit */
@@ -514,17 +549,10 @@ void ac_vpn_prune_stale(ac_vpn_store_t *vs, uint64_t now)
 
 uint32_t ac_vpn_count(const ac_vpn_store_t *vs)
 {
-    uint32_t i, count = 0;
-
     if (!vs)
         return 0;
 
-    for (i = 0; i < vs->tunnel_count; i++) {
-        if (vs->tunnels[i].active &&
-            vs->tunnels[i].state != AC_VPN_STATE_CLOSED)
-            count++;
-    }
-    return count;
+    return ac_hashmap_count(&vs->tunnel_map);
 }
 
 int ac_vpn_rebuild(ac_vpn_store_t *vs,
@@ -532,21 +560,24 @@ int ac_vpn_rebuild(ac_vpn_store_t *vs,
                    uint32_t block_count)
 {
     uint32_t i;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
 
     if (!vs || (!blocks && block_count > 0))
         return AC_ERR_INVAL;
 
     ac_mutex_lock(&vs->lock);
 
-    /* Zeroize existing keys */
-    {
-        uint32_t j;
-        for (j = 0; j < vs->tunnel_count; j++)
-            ac_crypto_zeroize(vs->tunnels[j].vpn_pubkey, AC_PUBKEY_LEN);
+    /* Zeroize existing keys and free records */
+    ac_hashmap_iter_init(&it, &vs->tunnel_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_vpn_tunnel_t *tun = (ac_vpn_tunnel_t *)v;
+        ac_crypto_zeroize(tun->vpn_pubkey, AC_PUBKEY_LEN);
+        ac_free(tun);
+        ac_hashmap_iter_remove(&it);
     }
-
-    vs->tunnel_count = 0;
-    memset(vs->tunnels, 0, sizeof(vs->tunnels));
 
     for (i = 0; i < block_count; i++) {
         uint16_t j;
@@ -571,6 +602,7 @@ int ac_vpn_rebuild(ac_vpn_store_t *vs,
     }
 
     ac_mutex_unlock(&vs->lock);
-    ac_log(AC_LOG_INFO, "vpn store rebuilt: %u tunnels", vs->tunnel_count);
+    ac_log(AC_LOG_INFO, "vpn store rebuilt: %u tunnels",
+           ac_hashmap_count(&vs->tunnel_map));
     return AC_OK;
 }

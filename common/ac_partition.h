@@ -5,7 +5,9 @@
  * subnets, allow/deny cross-partition traffic. Partitions are named groups
  * of subnets with enforced isolation.
  *
- * Mitigates: N16,N22,N23
+ * Backed by ac_hashmap_t for dynamic scaling (S27).
+ *
+ * Mitigates: N16,N22,N23,S27
  */
 
 #ifndef AC_PARTITION_H
@@ -13,14 +15,16 @@
 
 #include "ac_proto.h"
 #include "ac_platform.h"
+#include "ac_hashmap.h"
 
 /* ------------------------------------------------------------------ */
-/*  Limits                                                             */
+/*  Limits (legacy constants removed; now dynamic via hashmap)         */
 /* ------------------------------------------------------------------ */
 
-#define AC_MAX_PARTITIONS           64
-#define AC_MAX_PARTITION_SUBNETS    32   /* subnets per partition */
-#define AC_MAX_CROSS_RULES          128  /* cross-partition allow rules */
+/* Removed: AC_MAX_PARTITIONS, AC_MAX_PARTITION_SUBNETS, AC_MAX_CROSS_RULES
+ * — now dynamic via hashmap */
+
+#define AC_PARTITION_SUBNET_INIT_CAP  8  /* initial subnet_ids capacity */
 
 /* ------------------------------------------------------------------ */
 /*  Partition record                                                   */
@@ -33,9 +37,10 @@ typedef struct {
     uint32_t    created_block;
     uint8_t     active;
 
-    /* Subnets belonging to this partition */
-    uint8_t     subnet_ids[AC_MAX_PARTITION_SUBNETS][AC_SUBNET_ID_LEN];
+    /* Dynamic array of subnets belonging to this partition (S27) */
+    uint8_t     (*subnet_ids)[AC_SUBNET_ID_LEN];
     uint32_t    subnet_count;
+    uint32_t    subnet_capacity;
 } ac_partition_record_t;
 
 /* Cross-partition traffic rule */
@@ -45,25 +50,33 @@ typedef struct {
     uint8_t     allowed;    /* 1 = allowed, 0 = denied */
 } ac_cross_rule_t;
 
+/* Composite key for cross-rule lookup: partition_a + partition_b */
+#define AC_CROSS_RULE_KEY_LEN  (AC_PARTITION_ID_LEN * 2)
+
 /* ------------------------------------------------------------------ */
 /*  Partition store                                                    */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    ac_partition_record_t   partitions[AC_MAX_PARTITIONS];
-    uint32_t                partition_count;
+    ac_hashmap_t    partition_map;   /* key: partition_id → ac_partition_record_t* */
+    uint32_t        partition_count;
 
-    ac_cross_rule_t         cross_rules[AC_MAX_CROSS_RULES];
-    uint32_t                cross_rule_count;
+    ac_hashmap_t    cross_rule_map;  /* key: partition_a+partition_b → ac_cross_rule_t* */
+    uint32_t        cross_rule_count;
 
-    ac_mutex_t              lock;
+    uint32_t        max_partitions;  /* 0 = unlimited (userspace) */
+    uint32_t        max_cross_rules; /* 0 = unlimited (userspace) */
+
+    ac_mutex_t      lock;
 } ac_partition_store_t;
 
 /* ------------------------------------------------------------------ */
 /*  API                                                                */
 /* ------------------------------------------------------------------ */
 
-int ac_partition_init(ac_partition_store_t *ps);
+int ac_partition_init(ac_partition_store_t *ps,
+                      uint32_t max_partitions,
+                      uint32_t max_cross_rules);
 void ac_partition_destroy(ac_partition_store_t *ps);
 
 int ac_partition_validate_block(ac_partition_store_t *ps,

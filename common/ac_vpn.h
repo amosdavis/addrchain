@@ -13,12 +13,12 @@
 
 #include "ac_proto.h"
 #include "ac_platform.h"
+#include "ac_hashmap.h"
 
 /* ------------------------------------------------------------------ */
 /*  Limits                                                             */
 /* ------------------------------------------------------------------ */
 
-#define AC_MAX_VPN_TUNNELS      128
 #define AC_VPN_HANDSHAKE_TIMEOUT_SEC  30
 #define AC_VPN_KEEPALIVE_INTERVAL_SEC 25
 #define AC_VPN_MAX_REKEY_ATTEMPTS     3
@@ -73,8 +73,8 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    ac_vpn_tunnel_t tunnels[AC_MAX_VPN_TUNNELS];
-    uint32_t        tunnel_count;
+    ac_hashmap_t    tunnel_map;
+    uint32_t        max_tunnels;
     ac_mutex_t      lock;
 } ac_vpn_store_t;
 
@@ -82,7 +82,7 @@ typedef struct {
 /*  API                                                                */
 /* ------------------------------------------------------------------ */
 
-int ac_vpn_init(ac_vpn_store_t *vs);
+int ac_vpn_init(ac_vpn_store_t *vs, uint32_t max_tunnels);
 void ac_vpn_destroy(ac_vpn_store_t *vs);
 
 /*

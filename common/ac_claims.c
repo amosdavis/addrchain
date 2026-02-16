@@ -1,13 +1,14 @@
 /*
- * ac_claims.c — Claim store for addrchain
+ * ac_claims.c — Claim store for addrchain (dynamic hashmap-backed)
  *
  * C port of Go claims.go with v2 extensions: lease TTL in blocks,
  * key revocation chain, rollback detection, address prefix validation.
+ * Backed by ac_hashmap_t for unlimited scaling (S01, S15).
  *
  * Thread-safe: all public functions acquire cs->lock.
  *
  * Mitigates: K01,K02,K07,K37,K41,N01,N02,N03,N04,N06,N10,N12,
- *            N28,N34,N38,N39
+ *            N28,N34,N38,N39,S01,S13,S15
  */
 
 #include "ac_claims.h"
@@ -17,59 +18,43 @@
 /*  Internal helpers (caller holds lock)                               */
 /* ================================================================== */
 
-/* Find claim slot by address. Returns index or -1 if not found. */
-static int find_claim(const ac_claim_store_t *cs, const ac_address_t *addr)
+/* Address key for hashmap: family + addr bytes = 33 bytes */
+#define AC_CLAIM_KEY_LEN (1 + AC_MAX_ADDR_LEN)
+
+static void make_claim_key(uint8_t out[AC_CLAIM_KEY_LEN],
+                           const ac_address_t *addr)
 {
-    uint32_t i;
-    for (i = 0; i < AC_MAX_CLAIMS; i++) {
-        if (cs->claims[i].active &&
-            ac_addr_cmp(&cs->claims[i].address, addr) == 0)
-            return (int)i;
-    }
-    return -1;
+    out[0] = addr->family;
+    memcpy(out + 1, addr->addr, AC_MAX_ADDR_LEN);
 }
 
-/* Find a free claim slot. Returns index or -1 if full. */
-static int find_free_claim(const ac_claim_store_t *cs)
+/* Find claim by address. Returns pointer or NULL. */
+static ac_claim_record_t *find_claim(ac_claim_store_t *cs,
+                                      const ac_address_t *addr)
 {
-    uint32_t i;
-    for (i = 0; i < AC_MAX_CLAIMS; i++) {
-        if (!cs->claims[i].active)
-            return (int)i;
-    }
-    return -1;
-}
-
-/* Find revocation entry for old_pubkey. Returns index or -1. */
-static int find_revocation(const ac_claim_store_t *cs,
-                           const uint8_t pubkey[AC_PUBKEY_LEN])
-{
-    uint32_t i;
-    for (i = 0; i < AC_MAX_REVOCATIONS; i++) {
-        if (cs->revoked[i].active &&
-            memcmp(cs->revoked[i].old_pubkey, pubkey, AC_PUBKEY_LEN) == 0)
-            return (int)i;
-    }
-    return -1;
+    uint8_t key[AC_CLAIM_KEY_LEN];
+    make_claim_key(key, addr);
+    return (ac_claim_record_t *)ac_hashmap_get(&cs->claims_map,
+                                                key, AC_CLAIM_KEY_LEN);
 }
 
 /* Resolve pubkey through revocation chain (no locking). */
 static void resolve_pubkey_internal(const ac_claim_store_t *cs,
-                                    const uint8_t pubkey[AC_PUBKEY_LEN],
-                                    uint8_t out[AC_PUBKEY_LEN])
+                                     const uint8_t pubkey[AC_PUBKEY_LEN],
+                                     uint8_t out[AC_PUBKEY_LEN])
 {
     uint8_t current[AC_PUBKEY_LEN];
     uint32_t depth = 0;
-    int idx;
+    ac_revocation_t *rev;
 
     memcpy(current, pubkey, AC_PUBKEY_LEN);
 
-    /* Follow revocation chain with cycle detection (max depth) */
-    while (depth < AC_MAX_REVOCATIONS) {
-        idx = find_revocation(cs, current);
-        if (idx < 0)
+    while (depth < cs->revoke_count + 1) {
+        rev = (ac_revocation_t *)ac_hashmap_get(&cs->revoke_map,
+                                                 current, AC_PUBKEY_LEN);
+        if (!rev || !rev->active)
             break;
-        memcpy(current, cs->revoked[idx].new_pubkey, AC_PUBKEY_LEN);
+        memcpy(current, rev->new_pubkey, AC_PUBKEY_LEN);
         depth++;
     }
 
@@ -78,25 +63,30 @@ static void resolve_pubkey_internal(const ac_claim_store_t *cs,
 
 /* Get effective lease TTL for a claim. */
 static uint32_t effective_lease(const ac_claim_store_t *cs,
-                                const ac_claim_record_t *rec)
+                                 const ac_claim_record_t *rec)
 {
     if (rec->lease_blocks != 0)
         return rec->lease_blocks;
     return cs->lease_ttl;
 }
 
-/* Expire stale leases at given block index. */
+/* Expire stale leases at given block index (S13: safe iter+remove). */
 static void expire_leases(ac_claim_store_t *cs, uint32_t tip_index)
 {
-    uint32_t i;
-    for (i = 0; i < AC_MAX_CLAIMS; i++) {
-        if (!cs->claims[i].active)
-            continue;
-        uint32_t ttl = effective_lease(cs, &cs->claims[i]);
-        if (tip_index > cs->claims[i].last_renewed_block + ttl) {
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
+    ac_hashmap_iter_init(&it, &cs->claims_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_claim_record_t *rec = (ac_claim_record_t *)v;
+        uint32_t ttl = effective_lease(cs, rec);
+        if (tip_index > rec->last_renewed_block + ttl) {
             ac_log_info("claim expired: block %u + ttl %u < tip %u",
-                        cs->claims[i].last_renewed_block, ttl, tip_index);
-            cs->claims[i].active = 0;
+                        rec->last_renewed_block, ttl, tip_index);
+            ac_hashmap_iter_remove(&it);
+            ac_free(rec);
             cs->claim_count--;
         }
     }
@@ -104,36 +94,45 @@ static void expire_leases(ac_claim_store_t *cs, uint32_t tip_index)
 
 /* Apply a single CLAIM/RELEASE/RENEW/REVOKE transaction. */
 static int apply_tx(ac_claim_store_t *cs,
-                    const ac_transaction_t *tx,
-                    uint32_t block_index)
+                     const ac_transaction_t *tx,
+                     uint32_t block_index)
 {
     uint8_t resolved[AC_PUBKEY_LEN];
-    int idx;
+    uint8_t key[AC_CLAIM_KEY_LEN];
+    ac_claim_record_t *rec;
 
     switch (tx->type) {
     case AC_TX_CLAIM: {
         const ac_tx_claim_t *cl = &tx->payload.claim;
 
-        /* N01: reject if already claimed (FCFS) */
-        idx = find_claim(cs, &cl->address);
-        if (idx >= 0)
-            return AC_OK; /* silently skip — block validation catches this */
+        rec = find_claim(cs, &cl->address);
+        if (rec != NULL)
+            return AC_OK;
 
-        /* K37: check capacity */
-        idx = find_free_claim(cs);
-        if (idx < 0) {
-            ac_log_warn("claim store full (%u/%u)", cs->claim_count, AC_MAX_CLAIMS);
+        if (cs->max_claims > 0 && cs->claim_count >= cs->max_claims) {
+            ac_log_warn("claim store full (%u/%u)", cs->claim_count, cs->max_claims);
             return AC_ERR_FULL;
         }
 
         resolve_pubkey_internal(cs, tx->node_pubkey, resolved);
 
-        cs->claims[idx].active = 1;
-        cs->claims[idx].address = cl->address;
-        memcpy(cs->claims[idx].owner_pubkey, resolved, AC_PUBKEY_LEN);
-        cs->claims[idx].last_renewed_block = block_index;
-        cs->claims[idx].lease_blocks = ac_le32_to_cpu(cl->lease_blocks);
-        cs->claims[idx].original_nonce = tx->nonce;
+        rec = (ac_claim_record_t *)ac_zalloc(sizeof(*rec), AC_MEM_NORMAL);
+        if (!rec)
+            return AC_ERR_NOMEM;
+
+        rec->active = 1;
+        rec->address = cl->address;
+        memcpy(rec->owner_pubkey, resolved, AC_PUBKEY_LEN);
+        rec->last_renewed_block = block_index;
+        rec->lease_blocks = ac_le32_to_cpu(cl->lease_blocks);
+        rec->original_nonce = tx->nonce;
+
+        make_claim_key(key, &cl->address);
+        if (ac_hashmap_put(&cs->claims_map, key, AC_CLAIM_KEY_LEN,
+                           rec, NULL) != AC_OK) {
+            ac_free(rec);
+            return AC_ERR_NOMEM;
+        }
         cs->claim_count++;
         break;
     }
@@ -141,68 +140,83 @@ static int apply_tx(ac_claim_store_t *cs,
     case AC_TX_RELEASE: {
         const ac_tx_claim_t *cl = &tx->payload.claim;
 
-        idx = find_claim(cs, &cl->address);
-        if (idx < 0)
-            return AC_OK; /* already released */
+        rec = find_claim(cs, &cl->address);
+        if (!rec)
+            return AC_OK;
 
         resolve_pubkey_internal(cs, tx->node_pubkey, resolved);
 
-        /* Only owner can release */
-        if (memcmp(cs->claims[idx].owner_pubkey, resolved, AC_PUBKEY_LEN) != 0)
-            return AC_OK; /* not owner — skip */
+        if (memcmp(rec->owner_pubkey, resolved, AC_PUBKEY_LEN) != 0)
+            return AC_OK;
 
-        cs->claims[idx].active = 0;
-        cs->claim_count--;
+        make_claim_key(key, &cl->address);
+        rec = (ac_claim_record_t *)ac_hashmap_remove(&cs->claims_map,
+                                                      key, AC_CLAIM_KEY_LEN);
+        if (rec) {
+            ac_free(rec);
+            cs->claim_count--;
+        }
         break;
     }
 
     case AC_TX_RENEW: {
         const ac_tx_claim_t *cl = &tx->payload.claim;
 
-        idx = find_claim(cs, &cl->address);
-        if (idx < 0)
-            return AC_OK; /* can't renew unclaimed */
+        rec = find_claim(cs, &cl->address);
+        if (!rec)
+            return AC_OK;
 
         resolve_pubkey_internal(cs, tx->node_pubkey, resolved);
 
-        if (memcmp(cs->claims[idx].owner_pubkey, resolved, AC_PUBKEY_LEN) != 0)
-            return AC_OK; /* not owner */
+        if (memcmp(rec->owner_pubkey, resolved, AC_PUBKEY_LEN) != 0)
+            return AC_OK;
 
-        cs->claims[idx].last_renewed_block = block_index;
-        /* Update lease if specified */
+        rec->last_renewed_block = block_index;
         if (ac_le32_to_cpu(cl->lease_blocks) != 0)
-            cs->claims[idx].lease_blocks = ac_le32_to_cpu(cl->lease_blocks);
+            rec->lease_blocks = ac_le32_to_cpu(cl->lease_blocks);
         break;
     }
 
     case AC_TX_REVOKE: {
         const ac_tx_revoke_t *rv = &tx->payload.revoke;
-        uint32_t i;
+        ac_revocation_t *revoc;
+        ac_hashmap_iter_t it;
+        const void *ik;
+        uint32_t ikl;
+        void *iv;
 
-        /* Record revocation */
-        if (cs->revoke_count < AC_MAX_REVOCATIONS) {
-            uint32_t ri = cs->revoke_count;
-            memcpy(cs->revoked[ri].old_pubkey, rv->old_pubkey, AC_PUBKEY_LEN);
-            memcpy(cs->revoked[ri].new_pubkey, rv->new_pubkey, AC_PUBKEY_LEN);
-            cs->revoked[ri].active = 1;
-            cs->revoke_count++;
+        revoc = (ac_revocation_t *)ac_zalloc(sizeof(*revoc), AC_MEM_NORMAL);
+        if (!revoc)
+            return AC_ERR_NOMEM;
+        memcpy(revoc->old_pubkey, rv->old_pubkey, AC_PUBKEY_LEN);
+        memcpy(revoc->new_pubkey, rv->new_pubkey, AC_PUBKEY_LEN);
+        revoc->active = 1;
+
+        {
+            void *old_rev = NULL;
+            if (ac_hashmap_put(&cs->revoke_map, rv->old_pubkey, AC_PUBKEY_LEN,
+                               revoc, &old_rev) != AC_OK) {
+                ac_free(revoc);
+                return AC_ERR_NOMEM;
+            }
+            if (old_rev)
+                ac_free(old_rev);
+            else
+                cs->revoke_count++;
         }
 
-        /* Migrate claims from old identity to new */
-        for (i = 0; i < AC_MAX_CLAIMS; i++) {
-            if (cs->claims[i].active &&
-                memcmp(cs->claims[i].owner_pubkey, rv->old_pubkey,
-                       AC_PUBKEY_LEN) == 0) {
-                memcpy(cs->claims[i].owner_pubkey, rv->new_pubkey,
-                       AC_PUBKEY_LEN);
+        ac_hashmap_iter_init(&it, &cs->claims_map);
+        while (ac_hashmap_iter_next(&it, &ik, &ikl, &iv)) {
+            ac_claim_record_t *cr = (ac_claim_record_t *)iv;
+            if (cr->active &&
+                memcmp(cr->owner_pubkey, rv->old_pubkey, AC_PUBKEY_LEN) == 0) {
+                memcpy(cr->owner_pubkey, rv->new_pubkey, AC_PUBKEY_LEN);
             }
         }
         break;
     }
 
     default:
-        /* Non-claim transaction types (SUBNET_*, VPN_*, PARTITION) —
-         * handled by other subsystems, ignore here. */
         break;
     }
 
@@ -213,7 +227,7 @@ static int apply_tx(ac_claim_store_t *cs,
 /*  Lifecycle                                                          */
 /* ================================================================== */
 
-int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl)
+int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims)
 {
     int rc;
 
@@ -226,20 +240,60 @@ int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl)
     if (rc != AC_OK)
         return rc;
 
+    cs->max_claims = max_claims;
+
+    if (max_claims > 0) {
+        size_t entry_overhead = sizeof(ac_claim_record_t) + AC_CLAIM_KEY_LEN + 64;
+        if ((uint64_t)max_claims * entry_overhead > (uint64_t)1 << 31) {
+            ac_log_error("max_claims %u would exceed vmalloc limit", max_claims);
+            ac_mutex_destroy(&cs->lock);
+            return AC_ERR_NOMEM;
+        }
+    }
+
+    rc = ac_hashmap_init(&cs->claims_map, 64, max_claims);
+    if (rc != AC_OK) {
+        ac_mutex_destroy(&cs->lock);
+        return rc;
+    }
+
+    rc = ac_hashmap_init(&cs->revoke_map, 16, 0);
+    if (rc != AC_OK) {
+        ac_hashmap_destroy(&cs->claims_map);
+        ac_mutex_destroy(&cs->lock);
+        return rc;
+    }
+
     cs->lease_ttl = (lease_ttl > 0) ? lease_ttl : AC_DEFAULT_LEASE_BLOCKS;
-    ac_log_info("claim store initialized (lease_ttl=%u blocks)", cs->lease_ttl);
+    ac_log_info("claim store initialized (lease_ttl=%u blocks, max=%u)",
+                cs->lease_ttl, max_claims);
     return AC_OK;
 }
 
 void ac_claims_destroy(ac_claim_store_t *cs)
 {
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
     if (!cs)
         return;
 
     ac_mutex_lock(&cs->lock);
-    /* K04: zeroize claim data (may contain sensitive pubkeys) */
-    ac_crypto_zeroize(cs->claims, sizeof(cs->claims));
-    ac_crypto_zeroize(cs->revoked, sizeof(cs->revoked));
+
+    ac_hashmap_iter_init(&it, &cs->claims_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_crypto_zeroize(v, sizeof(ac_claim_record_t));
+        ac_free(v);
+    }
+    ac_hashmap_destroy(&cs->claims_map);
+
+    ac_hashmap_iter_init(&it, &cs->revoke_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v))
+        ac_free(v);
+    ac_hashmap_destroy(&cs->revoke_map);
+
     cs->claim_count = 0;
     cs->revoke_count = 0;
     ac_mutex_unlock(&cs->lock);
@@ -253,21 +307,21 @@ void ac_claims_destroy(ac_claim_store_t *cs)
 /* ================================================================== */
 
 int ac_claims_get_owner(ac_claim_store_t *cs,
-                        const ac_address_t *addr,
-                        uint8_t out_owner[AC_PUBKEY_LEN])
+                         const ac_address_t *addr,
+                         uint8_t out_owner[AC_PUBKEY_LEN])
 {
-    int idx;
+    ac_claim_record_t *rec;
 
     if (!cs || !addr || !out_owner)
         return AC_ERR_INVAL;
 
     ac_mutex_lock(&cs->lock);
-    idx = find_claim(cs, addr);
-    if (idx < 0) {
+    rec = find_claim(cs, addr);
+    if (!rec) {
         ac_mutex_unlock(&cs->lock);
         return AC_ERR_NOENT;
     }
-    memcpy(out_owner, cs->claims[idx].owner_pubkey, AC_PUBKEY_LEN);
+    memcpy(out_owner, rec->owner_pubkey, AC_PUBKEY_LEN);
     ac_mutex_unlock(&cs->lock);
     return AC_OK;
 }
@@ -284,11 +338,15 @@ uint32_t ac_claims_count(ac_claim_store_t *cs)
 }
 
 uint32_t ac_claims_by_node(ac_claim_store_t *cs,
-                           const uint8_t pubkey[AC_PUBKEY_LEN],
-                           ac_address_t *out, uint32_t max_out)
+                            const uint8_t pubkey[AC_PUBKEY_LEN],
+                            ac_address_t *out, uint32_t max_out)
 {
-    uint32_t i, found = 0;
+    uint32_t found = 0;
     uint8_t resolved[AC_PUBKEY_LEN];
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
 
     if (!cs || !pubkey)
         return 0;
@@ -296,11 +354,13 @@ uint32_t ac_claims_by_node(ac_claim_store_t *cs,
     ac_mutex_lock(&cs->lock);
     resolve_pubkey_internal(cs, pubkey, resolved);
 
-    for (i = 0; i < AC_MAX_CLAIMS && found < max_out; i++) {
-        if (cs->claims[i].active &&
-            memcmp(cs->claims[i].owner_pubkey, resolved, AC_PUBKEY_LEN) == 0) {
+    ac_hashmap_iter_init(&it, &cs->claims_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v) && found < max_out) {
+        ac_claim_record_t *rec = (ac_claim_record_t *)v;
+        if (rec->active &&
+            memcmp(rec->owner_pubkey, resolved, AC_PUBKEY_LEN) == 0) {
             if (out)
-                out[found] = cs->claims[i].address;
+                out[found] = rec->address;
             found++;
         }
     }
@@ -313,23 +373,15 @@ uint32_t ac_claims_by_node(ac_claim_store_t *cs,
 /* ================================================================== */
 
 int ac_claims_validate_block(ac_claim_store_t *cs,
-                             const ac_block_t *blk)
+                              const ac_block_t *blk)
 {
-    /*
-     * Validate block transactions against current claim state.
-     * Uses a temporary overlay: we track "pending claims" for this
-     * block without modifying the actual store.
-     *
-     * Temporary overlay uses small arrays since blocks have
-     * at most AC_MAX_TX_PER_BLOCK transactions.
-     */
     ac_address_t pending_claims[AC_MAX_TX_PER_BLOCK];
     uint8_t pending_owners[AC_MAX_TX_PER_BLOCK][AC_PUBKEY_LEN];
     uint16_t pending_count = 0;
     ac_address_t pending_releases[AC_MAX_TX_PER_BLOCK];
     uint16_t release_count = 0;
     uint16_t i, j;
-    int idx;
+    ac_claim_record_t *rec;
     uint8_t resolved[AC_PUBKEY_LEN];
 
     if (!cs || !blk)
@@ -349,10 +401,8 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
         case AC_TX_CLAIM: {
             const ac_tx_claim_t *cl = &tx->payload.claim;
 
-            /* Check existing claims */
-            idx = find_claim(cs, &cl->address);
-            if (idx >= 0) {
-                /* Check if it was released in this block */
+            rec = find_claim(cs, &cl->address);
+            if (rec) {
                 int was_released = 0;
                 for (j = 0; j < release_count; j++) {
                     if (ac_addr_cmp(&pending_releases[j], &cl->address) == 0) {
@@ -367,7 +417,6 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
                 }
             }
 
-            /* Check pending claims in this block (intra-block conflict) */
             for (j = 0; j < pending_count; j++) {
                 if (ac_addr_cmp(&pending_claims[j], &cl->address) == 0) {
                     ac_log_warn("validate: tx %u intra-block duplicate claim", i);
@@ -376,7 +425,6 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
                 }
             }
 
-            /* Record pending claim */
             pending_claims[pending_count] = cl->address;
             memcpy(pending_owners[pending_count], resolved, AC_PUBKEY_LEN);
             pending_count++;
@@ -386,9 +434,8 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
         case AC_TX_RELEASE: {
             const ac_tx_claim_t *cl = &tx->payload.claim;
 
-            idx = find_claim(cs, &cl->address);
-            if (idx < 0) {
-                /* Check if it's a pending claim being released */
+            rec = find_claim(cs, &cl->address);
+            if (!rec) {
                 int found = 0;
                 for (j = 0; j < pending_count; j++) {
                     if (ac_addr_cmp(&pending_claims[j], &cl->address) == 0 &&
@@ -403,9 +450,7 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
                     return AC_ERR_NOENT;
                 }
             } else {
-                /* Verify ownership */
-                if (memcmp(cs->claims[idx].owner_pubkey, resolved,
-                           AC_PUBKEY_LEN) != 0) {
+                if (memcmp(rec->owner_pubkey, resolved, AC_PUBKEY_LEN) != 0) {
                     ac_log_warn("validate: tx %u release by non-owner", i);
                     ac_mutex_unlock(&cs->lock);
                     return AC_ERR_PERM;
@@ -419,9 +464,8 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
         case AC_TX_RENEW: {
             const ac_tx_claim_t *cl = &tx->payload.claim;
 
-            idx = find_claim(cs, &cl->address);
-            if (idx < 0) {
-                /* Check pending claims */
+            rec = find_claim(cs, &cl->address);
+            if (!rec) {
                 int found = 0;
                 for (j = 0; j < pending_count; j++) {
                     if (ac_addr_cmp(&pending_claims[j], &cl->address) == 0)
@@ -433,8 +477,7 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
                     return AC_ERR_NOENT;
                 }
             } else {
-                if (memcmp(cs->claims[idx].owner_pubkey, resolved,
-                           AC_PUBKEY_LEN) != 0) {
+                if (memcmp(rec->owner_pubkey, resolved, AC_PUBKEY_LEN) != 0) {
                     ac_log_warn("validate: tx %u renew by non-owner", i);
                     ac_mutex_unlock(&cs->lock);
                     return AC_ERR_PERM;
@@ -444,11 +487,9 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
         }
 
         case AC_TX_REVOKE:
-            /* Revocation validated at chain level (signature check) */
             break;
 
         default:
-            /* Non-claim types validated elsewhere */
             break;
         }
     }
@@ -462,7 +503,7 @@ int ac_claims_validate_block(ac_claim_store_t *cs,
 /* ================================================================== */
 
 int ac_claims_apply_block(ac_claim_store_t *cs,
-                          const ac_block_t *blk)
+                           const ac_block_t *blk)
 {
     uint16_t i;
     int rc;
@@ -487,19 +528,23 @@ int ac_claims_apply_block(ac_claim_store_t *cs,
 }
 
 /* ================================================================== */
-/*  Chain rebuild (N10, N28)                                           */
+/*  Chain rebuild (N10, N28) — iterates hashmap                        */
 /* ================================================================== */
 
 int ac_claims_rebuild(ac_claim_store_t *cs,
-                      const ac_block_t *blocks, uint32_t block_count,
-                      const uint8_t local_pubkey[AC_PUBKEY_LEN],
-                      ac_address_t *lost_addrs, uint32_t lost_max,
-                      uint32_t *lost_count)
+                       const ac_block_t *blocks, uint32_t block_count,
+                       const uint8_t local_pubkey[AC_PUBKEY_LEN],
+                       ac_address_t *lost_addrs, uint32_t lost_max,
+                       uint32_t *lost_count)
 {
-    /* Save old claims to detect rollback losses */
-    ac_claim_record_t *old_claims = NULL;
+    ac_hashmap_t old_map;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
     uint32_t i, j;
     uint32_t tip_index;
+    int rc;
 
     if (!cs || !blocks || block_count == 0)
         return AC_ERR_INVAL;
@@ -507,25 +552,29 @@ int ac_claims_rebuild(ac_claim_store_t *cs,
     if (lost_count)
         *lost_count = 0;
 
-    old_claims = (ac_claim_record_t *)ac_alloc(
-        sizeof(ac_claim_record_t) * AC_MAX_CLAIMS, AC_MEM_NORMAL);
-    if (!old_claims)
-        return AC_ERR_NOMEM;
-
     ac_mutex_lock(&cs->lock);
 
-    /* Save old state */
-    memcpy(old_claims, cs->claims, sizeof(cs->claims));
+    /* Move current claims map to old_map for rollback detection */
+    old_map = cs->claims_map;
 
-    /* Clear all state */
-    memset(cs->claims, 0, sizeof(cs->claims));
-    memset(cs->revoked, 0, sizeof(cs->revoked));
+    rc = ac_hashmap_init(&cs->claims_map, 64, cs->max_claims);
+    if (rc != AC_OK) {
+        cs->claims_map = old_map;
+        ac_mutex_unlock(&cs->lock);
+        return rc;
+    }
     cs->claim_count = 0;
+
+    /* Clear revocations */
+    ac_hashmap_iter_init(&it, &cs->revoke_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_free(v);
+        ac_hashmap_iter_remove(&it);
+    }
     cs->revoke_count = 0;
 
     tip_index = blocks[block_count - 1].index;
 
-    /* Replay all blocks */
     for (i = 0; i < block_count; i++) {
         for (j = 0; j < blocks[i].tx_count && j < AC_MAX_TX_PER_BLOCK; j++) {
             apply_tx(cs, &blocks[i].txs[j], blocks[i].index);
@@ -540,28 +589,21 @@ int ac_claims_rebuild(ac_claim_store_t *cs,
         uint8_t resolved_local[AC_PUBKEY_LEN];
         resolve_pubkey_internal(cs, local_pubkey, resolved_local);
 
-        for (i = 0; i < AC_MAX_CLAIMS && losses < lost_max; i++) {
-            if (!old_claims[i].active)
+        ac_hashmap_iter_init(&it, &old_map);
+        while (ac_hashmap_iter_next(&it, &k, &kl, &v) && losses < lost_max) {
+            ac_claim_record_t *old_rec = (ac_claim_record_t *)v;
+            if (!old_rec->active)
                 continue;
-            if (memcmp(old_claims[i].owner_pubkey, resolved_local,
-                       AC_PUBKEY_LEN) != 0)
+            if (memcmp(old_rec->owner_pubkey, resolved_local, AC_PUBKEY_LEN) != 0)
                 continue;
 
-            /* Check if we still own this address */
-            int still_owned = 0;
-            for (j = 0; j < AC_MAX_CLAIMS; j++) {
-                if (cs->claims[j].active &&
-                    ac_addr_cmp(&cs->claims[j].address,
-                                &old_claims[i].address) == 0 &&
-                    memcmp(cs->claims[j].owner_pubkey, resolved_local,
-                           AC_PUBKEY_LEN) == 0) {
-                    still_owned = 1;
-                    break;
-                }
-            }
+            ac_claim_record_t *new_rec = find_claim(cs, &old_rec->address);
+            int still_owned = (new_rec != NULL &&
+                               memcmp(new_rec->owner_pubkey, resolved_local,
+                                      AC_PUBKEY_LEN) == 0);
 
             if (!still_owned) {
-                lost_addrs[losses++] = old_claims[i].address;
+                lost_addrs[losses++] = old_rec->address;
             }
         }
         *lost_count = losses;
@@ -573,8 +615,13 @@ int ac_claims_rebuild(ac_claim_store_t *cs,
 
     ac_mutex_unlock(&cs->lock);
 
-    ac_crypto_zeroize(old_claims, sizeof(ac_claim_record_t) * AC_MAX_CLAIMS);
-    ac_free(old_claims);
+    /* Free old map entries */
+    ac_hashmap_iter_init(&it, &old_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_crypto_zeroize(v, sizeof(ac_claim_record_t));
+        ac_free(v);
+    }
+    ac_hashmap_destroy(&old_map);
 
     ac_log_info("claim store rebuilt from %u blocks, %u active claims",
                 block_count, cs->claim_count);
@@ -586,8 +633,8 @@ int ac_claims_rebuild(ac_claim_store_t *cs,
 /* ================================================================== */
 
 void ac_claims_resolve_pubkey(ac_claim_store_t *cs,
-                              const uint8_t pubkey[AC_PUBKEY_LEN],
-                              uint8_t out[AC_PUBKEY_LEN])
+                               const uint8_t pubkey[AC_PUBKEY_LEN],
+                               uint8_t out[AC_PUBKEY_LEN])
 {
     if (!cs || !pubkey || !out) {
         if (out && pubkey)

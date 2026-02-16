@@ -1,11 +1,11 @@
 /*
- * ac_subnet.h — Subnet management interface
+ * ac_subnet.h — Subnet management interface (dynamic hashmap-backed)
  *
  * Manages SUBNET_CREATE and SUBNET_ASSIGN transactions. Validates prefix
  * membership, detects overlapping subnets, and tracks node-to-subnet
- * assignments.
+ * assignments. Backed by ac_hashmap_t for unlimited scaling.
  *
- * Mitigates: N02,N05,N11,N12,N13,N14,N15,N20,N29,N31
+ * Mitigates: N02,N05,N11,N12,N13,N14,N15,N20,N29,N31,S01,S15
  */
 
 #ifndef AC_SUBNET_H
@@ -13,13 +13,7 @@
 
 #include "ac_proto.h"
 #include "ac_platform.h"
-
-/* ------------------------------------------------------------------ */
-/*  Limits                                                             */
-/* ------------------------------------------------------------------ */
-
-#define AC_MAX_SUBNETS          256
-#define AC_MAX_SUBNET_MEMBERS   1024
+#include "ac_hashmap.h"
 
 /* ------------------------------------------------------------------ */
 /*  Subnet record                                                      */
@@ -45,16 +39,21 @@ typedef struct {
     uint32_t    assigned_block;
 } ac_subnet_member_t;
 
+/* Member composite key: pubkey(32) + subnet_id(32) = 64 bytes */
+#define AC_MEMBER_KEY_LEN (AC_PUBKEY_LEN + AC_SUBNET_ID_LEN)
+
 /* ------------------------------------------------------------------ */
 /*  Subnet store                                                       */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    ac_subnet_record_t  subnets[AC_MAX_SUBNETS];
+    ac_hashmap_t        subnet_map;     /* keyed by subnet_id */
     uint32_t            subnet_count;
+    uint32_t            max_subnets;
 
-    ac_subnet_member_t  members[AC_MAX_SUBNET_MEMBERS];
+    ac_hashmap_t        member_map;     /* keyed by pubkey+subnet_id */
     uint32_t            member_count;
+    uint32_t            max_members;
 
     ac_mutex_t          lock;
 } ac_subnet_store_t;
@@ -65,9 +64,11 @@ typedef struct {
 
 /*
  * ac_subnet_init — Initialize the subnet store.
+ * max_subnets/max_members: 0 = unlimited (userspace), >0 = capped (kernel).
  * Returns AC_OK on success.
  */
-int ac_subnet_init(ac_subnet_store_t *ss);
+int ac_subnet_init(ac_subnet_store_t *ss,
+                   uint32_t max_subnets, uint32_t max_members);
 
 /*
  * ac_subnet_destroy — Free subnet store resources.

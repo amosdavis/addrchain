@@ -1,11 +1,12 @@
 /*
- * ac_subnet.c — Subnet management implementation
+ * ac_subnet.c — Subnet management implementation (dynamic hashmap-backed)
  *
  * Manages SUBNET_CREATE / SUBNET_ASSIGN transactions. Validates prefix
  * membership, detects overlapping subnets, enforces gateway/DNS requirements,
  * and tracks node-to-subnet assignments.
+ * Backed by ac_hashmap_t for unlimited scaling.
  *
- * Mitigates: N02,N05,N11,N12,N13,N14,N15,N20,N29,N31
+ * Mitigates: N02,N05,N11,N12,N13,N14,N15,N20,N29,N31,S01,S15
  */
 
 #include "ac_subnet.h"
@@ -18,7 +19,6 @@
 /*  Internal helpers                                                   */
 /* ================================================================== */
 
-/* Safe strlen for fixed-size ID fields */
 static uint32_t id_len(const uint8_t *id, uint32_t max)
 {
     uint32_t i;
@@ -29,15 +29,6 @@ static uint32_t id_len(const uint8_t *id, uint32_t max)
     return max;
 }
 
-/* Compare two subnet IDs */
-static int id_eq(const uint8_t *a, const uint8_t *b)
-{
-    return memcmp(a, b, AC_SUBNET_ID_LEN) == 0;
-}
-
-/*
- * addr_effective_bits — Return the number of meaningful bits for a family.
- */
 static uint16_t addr_max_bits(uint8_t family)
 {
     switch (family) {
@@ -48,10 +39,6 @@ static uint16_t addr_max_bits(uint8_t family)
     }
 }
 
-/*
- * prefix_match — Check if addr is within prefix/prefix_len.
- * Both must have the same family.
- */
 static int prefix_match(const ac_address_t *prefix,
                         const ac_address_t *addr)
 {
@@ -70,7 +57,7 @@ static int prefix_match(const ac_address_t *prefix,
         return 0;
 
     if (prefix->prefix_len == 0)
-        return 1; /* /0 matches everything */
+        return 1;
 
     full_bytes = prefix->prefix_len / 8;
     rem_bits = prefix->prefix_len % 8;
@@ -90,43 +77,55 @@ static int prefix_match(const ac_address_t *prefix,
     return 1;
 }
 
-/*
- * prefixes_overlap — Two CIDR prefixes overlap if either contains the
- * network address of the other.
- */
 static int prefixes_overlap(const ac_address_t *a, const ac_address_t *b)
 {
     if (a->family != b->family)
         return 0;
 
-    /* If A's prefix contains B's network addr, or vice versa */
     return prefix_match(a, b) || prefix_match(b, a);
 }
 
-/* Validate a SUBNET_CREATE transaction */
-static int validate_subnet_create(const ac_subnet_store_t *ss,
+/* Build member composite key: pubkey + subnet_id */
+static void make_member_key(uint8_t out[AC_MEMBER_KEY_LEN],
+                            const uint8_t pubkey[AC_PUBKEY_LEN],
+                            const uint8_t subnet_id[AC_SUBNET_ID_LEN])
+{
+    memcpy(out, pubkey, AC_PUBKEY_LEN);
+    memcpy(out + AC_PUBKEY_LEN, subnet_id, AC_SUBNET_ID_LEN);
+}
+
+/* Find subnet by id (caller holds lock). */
+static ac_subnet_record_t *find_subnet(ac_subnet_store_t *ss,
+                                        const uint8_t subnet_id[AC_SUBNET_ID_LEN])
+{
+    return (ac_subnet_record_t *)ac_hashmap_get(&ss->subnet_map,
+                                                 subnet_id, AC_SUBNET_ID_LEN);
+}
+
+/* Validate a SUBNET_CREATE transaction (caller holds lock). */
+static int validate_subnet_create(ac_subnet_store_t *ss,
                                   const ac_tx_subnet_create_t *sc,
                                   const uint8_t *creator)
 {
-    uint32_t i;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
     uint16_t max_bits;
 
     (void)creator;
 
-    /* Subnet ID must not be empty */
     if (id_len(sc->subnet_id, AC_SUBNET_ID_LEN) == 0) {
         ac_log(AC_LOG_WARN, "validate: empty subnet_id");
         return AC_ERR_INVAL;
     }
 
-    /* Prefix must have valid family */
     max_bits = addr_max_bits(sc->prefix.family);
     if (max_bits == 0) {
         ac_log(AC_LOG_WARN, "validate: invalid prefix family");
         return AC_ERR_INVAL;
     }
 
-    /* Prefix length must not exceed address size */
     if (sc->prefix.prefix_len > max_bits) {
         ac_log(AC_LOG_WARN, "validate: prefix_len exceeds max for family");
         return AC_ERR_INVAL;
@@ -140,7 +139,6 @@ static int validate_subnet_create(const ac_subnet_store_t *ss,
             ac_log(AC_LOG_WARN, "validate: gateway REQUIRED (use --no-gateway for explicit opt-out)");
             return AC_ERR_INVAL;
         }
-        /* Gateway must be within the subnet prefix */
         if (!prefix_match(&sc->prefix, &sc->gateway)) {
             ac_log(AC_LOG_WARN, "validate: gateway not within subnet prefix");
             return AC_ERR_INVAL;
@@ -160,77 +158,75 @@ static int validate_subnet_create(const ac_subnet_store_t *ss,
     }
 
     /* Check for duplicate subnet_id */
-    for (i = 0; i < ss->subnet_count; i++) {
-        if (ss->subnets[i].active &&
-            id_eq(ss->subnets[i].subnet_id, sc->subnet_id)) {
+    {
+        ac_subnet_record_t *existing = find_subnet(ss, sc->subnet_id);
+        if (existing && existing->active) {
             ac_log(AC_LOG_WARN, "validate: subnet_id already exists");
             return AC_ERR_EXIST;
         }
     }
 
-    /* Check for overlapping prefix (N11) */
-    for (i = 0; i < ss->subnet_count; i++) {
-        if (ss->subnets[i].active &&
-            prefixes_overlap(&ss->subnets[i].prefix, &sc->prefix)) {
+    /* Check for overlapping prefix (N11) via hashmap iteration */
+    ac_hashmap_iter_init(&it, &ss->subnet_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_subnet_record_t *rec = (ac_subnet_record_t *)v;
+        if (rec->active && prefixes_overlap(&rec->prefix, &sc->prefix)) {
             ac_log(AC_LOG_WARN, "validate: prefix overlaps existing subnet");
             return AC_ERR_OVERLAP;
         }
     }
 
     /* Capacity check */
-    if (ss->subnet_count >= AC_MAX_SUBNETS) {
-        ac_log(AC_LOG_WARN, "validate: subnet store full");
+    if (ss->max_subnets > 0 && ss->subnet_count >= ss->max_subnets) {
+        ac_log(AC_LOG_WARN, "validate: subnet store full (%u/%u)",
+               ss->subnet_count, ss->max_subnets);
         return AC_ERR_NOMEM;
     }
 
     return AC_OK;
 }
 
-/* Validate a SUBNET_ASSIGN transaction */
-static int validate_subnet_assign(const ac_subnet_store_t *ss,
+/* Validate a SUBNET_ASSIGN transaction (caller holds lock). */
+static int validate_subnet_assign(ac_subnet_store_t *ss,
                                   const ac_tx_subnet_assign_t *sa)
 {
-    uint32_t i;
-    int found = 0;
+    ac_subnet_record_t *subnet;
+    uint8_t mkey[AC_MEMBER_KEY_LEN];
 
-    /* Target subnet must exist */
-    for (i = 0; i < ss->subnet_count; i++) {
-        if (ss->subnets[i].active &&
-            id_eq(ss->subnets[i].subnet_id, sa->subnet_id)) {
-            found = 1;
-            break;
-        }
-    }
-    if (!found) {
+    subnet = find_subnet(ss, sa->subnet_id);
+    if (!subnet || !subnet->active) {
         ac_log(AC_LOG_WARN, "validate: subnet_id not found for ASSIGN");
         return AC_ERR_NOENT;
     }
 
     /* Check if node already assigned to this subnet */
-    for (i = 0; i < ss->member_count; i++) {
-        if (memcmp(ss->members[i].node_pubkey, sa->node_pubkey, AC_PUBKEY_LEN) == 0 &&
-            id_eq(ss->members[i].subnet_id, sa->subnet_id)) {
-            ac_log(AC_LOG_WARN, "validate: node already assigned to subnet");
-            return AC_ERR_EXIST;
-        }
+    make_member_key(mkey, sa->node_pubkey, sa->subnet_id);
+    if (ac_hashmap_get(&ss->member_map, mkey, AC_MEMBER_KEY_LEN) != NULL) {
+        ac_log(AC_LOG_WARN, "validate: node already assigned to subnet");
+        return AC_ERR_EXIST;
     }
 
     /* Capacity check */
-    if (ss->member_count >= AC_MAX_SUBNET_MEMBERS) {
-        ac_log(AC_LOG_WARN, "validate: member table full");
+    if (ss->max_members > 0 && ss->member_count >= ss->max_members) {
+        ac_log(AC_LOG_WARN, "validate: member table full (%u/%u)",
+               ss->member_count, ss->max_members);
         return AC_ERR_NOMEM;
     }
 
     return AC_OK;
 }
 
-/* Apply a SUBNET_CREATE */
-static void apply_subnet_create(ac_subnet_store_t *ss,
+/* Apply a SUBNET_CREATE (caller holds lock). */
+static int apply_subnet_create(ac_subnet_store_t *ss,
                                 const ac_tx_subnet_create_t *sc,
                                 const uint8_t *creator,
                                 uint32_t block_index)
 {
-    ac_subnet_record_t *rec = &ss->subnets[ss->subnet_count];
+    ac_subnet_record_t *rec;
+
+    rec = (ac_subnet_record_t *)ac_zalloc(sizeof(*rec), AC_MEM_NORMAL);
+    if (!rec)
+        return AC_ERR_NOMEM;
 
     memcpy(rec->subnet_id, sc->subnet_id, AC_SUBNET_ID_LEN);
     rec->prefix = sc->prefix;
@@ -243,46 +239,120 @@ static void apply_subnet_create(ac_subnet_store_t *ss,
     rec->created_block = block_index;
     rec->active = 1;
 
+    if (ac_hashmap_put(&ss->subnet_map, sc->subnet_id, AC_SUBNET_ID_LEN,
+                       rec, NULL) != AC_OK) {
+        ac_free(rec);
+        return AC_ERR_NOMEM;
+    }
     ss->subnet_count++;
     ac_log(AC_LOG_INFO, "subnet created: %.31s", sc->subnet_id);
+    return AC_OK;
 }
 
-/* Apply a SUBNET_ASSIGN */
-static void apply_subnet_assign(ac_subnet_store_t *ss,
+/* Apply a SUBNET_ASSIGN (caller holds lock). */
+static int apply_subnet_assign(ac_subnet_store_t *ss,
                                 const ac_tx_subnet_assign_t *sa,
                                 uint32_t block_index)
 {
-    ac_subnet_member_t *mem = &ss->members[ss->member_count];
+    ac_subnet_member_t *mem;
+    uint8_t mkey[AC_MEMBER_KEY_LEN];
+
+    mem = (ac_subnet_member_t *)ac_zalloc(sizeof(*mem), AC_MEM_NORMAL);
+    if (!mem)
+        return AC_ERR_NOMEM;
 
     memcpy(mem->node_pubkey, sa->node_pubkey, AC_PUBKEY_LEN);
     memcpy(mem->subnet_id, sa->subnet_id, AC_SUBNET_ID_LEN);
     mem->assigned_block = block_index;
 
+    make_member_key(mkey, sa->node_pubkey, sa->subnet_id);
+    if (ac_hashmap_put(&ss->member_map, mkey, AC_MEMBER_KEY_LEN,
+                       mem, NULL) != AC_OK) {
+        ac_free(mem);
+        return AC_ERR_NOMEM;
+    }
     ss->member_count++;
     ac_log(AC_LOG_INFO, "node assigned to subnet: %.31s", sa->subnet_id);
+    return AC_OK;
 }
 
 /* ================================================================== */
 /*  Public API                                                         */
 /* ================================================================== */
 
-int ac_subnet_init(ac_subnet_store_t *ss)
+int ac_subnet_init(ac_subnet_store_t *ss,
+                   uint32_t max_subnets, uint32_t max_members)
 {
+    int rc;
+
     if (!ss)
         return AC_ERR_INVAL;
 
     memset(ss, 0, sizeof(*ss));
-    ac_mutex_init(&ss->lock);
-    ac_log(AC_LOG_INFO, "subnet store initialized");
+
+    rc = ac_mutex_init(&ss->lock);
+    if (rc != AC_OK)
+        return rc;
+
+    ss->max_subnets = max_subnets;
+    ss->max_members = max_members;
+
+    /* S15: validate vmalloc size */
+    if (max_subnets > 0) {
+        size_t overhead = sizeof(ac_subnet_record_t) + AC_SUBNET_ID_LEN + 64;
+        if ((uint64_t)max_subnets * overhead > (uint64_t)1 << 31) {
+            ac_log(AC_LOG_ERROR, "max_subnets %u would exceed vmalloc limit",
+                   max_subnets);
+            ac_mutex_destroy(&ss->lock);
+            return AC_ERR_NOMEM;
+        }
+    }
+
+    rc = ac_hashmap_init(&ss->subnet_map, 32, max_subnets);
+    if (rc != AC_OK) {
+        ac_mutex_destroy(&ss->lock);
+        return rc;
+    }
+
+    rc = ac_hashmap_init(&ss->member_map, 64, max_members);
+    if (rc != AC_OK) {
+        ac_hashmap_destroy(&ss->subnet_map);
+        ac_mutex_destroy(&ss->lock);
+        return rc;
+    }
+
+    ac_log(AC_LOG_INFO, "subnet store initialized (max_subnets=%u, max_members=%u)",
+           max_subnets, max_members);
     return AC_OK;
 }
 
 void ac_subnet_destroy(ac_subnet_store_t *ss)
 {
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
     if (!ss)
         return;
+
+    ac_mutex_lock(&ss->lock);
+
+    ac_hashmap_iter_init(&it, &ss->subnet_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v))
+        ac_free(v);
+    ac_hashmap_destroy(&ss->subnet_map);
+
+    ac_hashmap_iter_init(&it, &ss->member_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v))
+        ac_free(v);
+    ac_hashmap_destroy(&ss->member_map);
+
+    ss->subnet_count = 0;
+    ss->member_count = 0;
+    ac_mutex_unlock(&ss->lock);
+
     ac_mutex_destroy(&ss->lock);
-    memset(ss, 0, sizeof(*ss));
     ac_log(AC_LOG_INFO, "subnet store destroyed");
 }
 
@@ -319,7 +389,6 @@ int ac_subnet_validate_block(ac_subnet_store_t *ss,
             break;
 
         default:
-            /* Non-subnet tx types are fine — skip */
             break;
         }
     }
@@ -332,6 +401,7 @@ int ac_subnet_apply_block(ac_subnet_store_t *ss,
                           const ac_block_t *blk)
 {
     uint16_t i;
+    int rc;
 
     if (!ss || !blk)
         return AC_ERR_INVAL;
@@ -343,15 +413,19 @@ int ac_subnet_apply_block(ac_subnet_store_t *ss,
 
         switch (tx->type) {
         case AC_TX_SUBNET_CREATE:
-            if (ss->subnet_count < AC_MAX_SUBNETS)
-                apply_subnet_create(ss, &tx->payload.subnet_create,
-                                    tx->node_pubkey, blk->index);
+            rc = apply_subnet_create(ss, &tx->payload.subnet_create,
+                                     tx->node_pubkey, blk->index);
+            if (rc != AC_OK) {
+                ac_log(AC_LOG_WARN, "apply: subnet create failed: %d", rc);
+            }
             break;
 
         case AC_TX_SUBNET_ASSIGN:
-            if (ss->member_count < AC_MAX_SUBNET_MEMBERS)
-                apply_subnet_assign(ss, &tx->payload.subnet_assign,
-                                    blk->index);
+            rc = apply_subnet_assign(ss, &tx->payload.subnet_assign,
+                                     blk->index);
+            if (rc != AC_OK) {
+                ac_log(AC_LOG_WARN, "apply: subnet assign failed: %d", rc);
+            }
             break;
 
         default:
@@ -366,15 +440,14 @@ int ac_subnet_apply_block(ac_subnet_store_t *ss,
 const ac_subnet_record_t *ac_subnet_find(const ac_subnet_store_t *ss,
                                          const uint8_t subnet_id[AC_SUBNET_ID_LEN])
 {
-    uint32_t i;
+    ac_subnet_record_t *rec;
     if (!ss || !subnet_id)
         return NULL;
 
-    for (i = 0; i < ss->subnet_count; i++) {
-        if (ss->subnets[i].active &&
-            id_eq(ss->subnets[i].subnet_id, subnet_id))
-            return &ss->subnets[i];
-    }
+    rec = (ac_subnet_record_t *)ac_hashmap_get(
+        (ac_hashmap_t *)&ss->subnet_map, subnet_id, AC_SUBNET_ID_LEN);
+    if (rec && rec->active)
+        return rec;
     return NULL;
 }
 
@@ -397,16 +470,13 @@ int ac_subnet_is_member(const ac_subnet_store_t *ss,
                         const uint8_t node_pubkey[AC_PUBKEY_LEN],
                         const uint8_t subnet_id[AC_SUBNET_ID_LEN])
 {
-    uint32_t i;
+    uint8_t mkey[AC_MEMBER_KEY_LEN];
     if (!ss || !node_pubkey || !subnet_id)
         return 0;
 
-    for (i = 0; i < ss->member_count; i++) {
-        if (memcmp(ss->members[i].node_pubkey, node_pubkey, AC_PUBKEY_LEN) == 0 &&
-            id_eq(ss->members[i].subnet_id, subnet_id))
-            return 1;
-    }
-    return 0;
+    make_member_key(mkey, node_pubkey, subnet_id);
+    return ac_hashmap_get((ac_hashmap_t *)&ss->member_map,
+                          mkey, AC_MEMBER_KEY_LEN) != NULL;
 }
 
 uint32_t ac_subnet_count(const ac_subnet_store_t *ss)
@@ -427,6 +497,10 @@ int ac_subnet_rebuild(ac_subnet_store_t *ss,
                       const ac_block_t *blocks,
                       uint32_t block_count)
 {
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
     uint32_t i;
 
     if (!ss || (!blocks && block_count > 0))
@@ -434,12 +508,22 @@ int ac_subnet_rebuild(ac_subnet_store_t *ss,
 
     ac_mutex_lock(&ss->lock);
 
-    /* Reset state */
+    /* Free existing entries */
+    ac_hashmap_iter_init(&it, &ss->subnet_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_free(v);
+        ac_hashmap_iter_remove(&it);
+    }
     ss->subnet_count = 0;
-    ss->member_count = 0;
-    memset(ss->subnets, 0, sizeof(ss->subnets));
-    memset(ss->members, 0, sizeof(ss->members));
 
+    ac_hashmap_iter_init(&it, &ss->member_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_free(v);
+        ac_hashmap_iter_remove(&it);
+    }
+    ss->member_count = 0;
+
+    /* Replay blocks */
     for (i = 0; i < block_count; i++) {
         uint16_t j;
         const ac_block_t *blk = &blocks[i];
@@ -449,15 +533,13 @@ int ac_subnet_rebuild(ac_subnet_store_t *ss,
 
             switch (tx->type) {
             case AC_TX_SUBNET_CREATE:
-                if (ss->subnet_count < AC_MAX_SUBNETS)
-                    apply_subnet_create(ss, &tx->payload.subnet_create,
-                                        tx->node_pubkey, blk->index);
+                apply_subnet_create(ss, &tx->payload.subnet_create,
+                                    tx->node_pubkey, blk->index);
                 break;
 
             case AC_TX_SUBNET_ASSIGN:
-                if (ss->member_count < AC_MAX_SUBNET_MEMBERS)
-                    apply_subnet_assign(ss, &tx->payload.subnet_assign,
-                                        blk->index);
+                apply_subnet_assign(ss, &tx->payload.subnet_assign,
+                                    blk->index);
                 break;
 
             default:

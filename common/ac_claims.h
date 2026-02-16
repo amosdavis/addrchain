@@ -30,13 +30,13 @@
 #include "ac_proto.h"
 #include "ac_platform.h"
 #include "ac_chain.h"
+#include "ac_hashmap.h"
 
 /* ------------------------------------------------------------------ */
-/*  Limits                                                             */
+/*  Limits (legacy constants kept for reference; no longer enforced)    */
 /* ------------------------------------------------------------------ */
 
-#define AC_MAX_CLAIMS       4096    /* max concurrent address claims    */
-#define AC_MAX_REVOCATIONS  256     /* max tracked key revocations      */
+/* Removed: AC_MAX_CLAIMS, AC_MAX_REVOCATIONS — now dynamic via hashmap */
 
 /* ------------------------------------------------------------------ */
 /*  Claim record                                                       */
@@ -66,11 +66,12 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    ac_claim_record_t   claims[AC_MAX_CLAIMS];
+    ac_hashmap_t        claims_map;     /* key: ac_address_t bytes → ac_claim_record_t* */
     uint32_t            claim_count;
-    ac_revocation_t     revoked[AC_MAX_REVOCATIONS];
+    ac_hashmap_t        revoke_map;     /* key: old_pubkey bytes → ac_revocation_t* */
     uint32_t            revoke_count;
     uint32_t            lease_ttl;      /* default lease in blocks */
+    uint32_t            max_claims;     /* 0 = unlimited (userspace) */
     ac_mutex_t          lock;           /* K07: claim_lock (order 2) */
 } ac_claim_store_t;
 
@@ -79,8 +80,9 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /* Initialize claim store with default or custom lease TTL.
- * If lease_ttl == 0, uses AC_DEFAULT_LEASE_BLOCKS. */
-int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl);
+ * If lease_ttl == 0, uses AC_DEFAULT_LEASE_BLOCKS.
+ * max_claims: 0 = unlimited (userspace). In kernel, set from module param. */
+int ac_claims_init(ac_claim_store_t *cs, uint32_t lease_ttl, uint32_t max_claims);
 
 /* Free claim store resources. */
 void ac_claims_destroy(ac_claim_store_t *cs);

@@ -5,7 +5,9 @@
  * subnets, allow/deny cross-partition traffic. Partitions enforce isolation
  * by default — cross-partition traffic is blocked unless explicitly allowed.
  *
- * Mitigates: N16,N22,N23
+ * Backed by ac_hashmap_t for dynamic scaling (S27).
+ *
+ * Mitigates: N16,N22,N23,S27
  */
 
 #include "ac_partition.h"
@@ -32,33 +34,65 @@ static uint32_t id_slen(const uint8_t *id, uint32_t max)
     return max;
 }
 
-static ac_partition_record_t *find_mut(ac_partition_store_t *ps,
-                                       const uint8_t id[AC_PARTITION_ID_LEN])
-{
-    uint32_t i;
-    for (i = 0; i < ps->partition_count; i++) {
-        if (ps->partitions[i].active &&
-            id_eq(ps->partitions[i].partition_id, id, AC_PARTITION_ID_LEN))
-            return &ps->partitions[i];
-    }
-    return NULL;
-}
-
-/* Find cross-rule index, or -1 */
-static int find_cross_rule(const ac_partition_store_t *ps,
+/* Build canonical cross-rule key: always store smaller ID first */
+static void make_cross_key(uint8_t key[AC_CROSS_RULE_KEY_LEN],
                            const uint8_t a[AC_PARTITION_ID_LEN],
                            const uint8_t b[AC_PARTITION_ID_LEN])
 {
-    uint32_t i;
-    for (i = 0; i < ps->cross_rule_count; i++) {
-        if ((id_eq(ps->cross_rules[i].partition_a, a, AC_PARTITION_ID_LEN) &&
-             id_eq(ps->cross_rules[i].partition_b, b, AC_PARTITION_ID_LEN)) ||
-            (id_eq(ps->cross_rules[i].partition_a, b, AC_PARTITION_ID_LEN) &&
-             id_eq(ps->cross_rules[i].partition_b, a, AC_PARTITION_ID_LEN))) {
-            return (int)i;
-        }
+    if (memcmp(a, b, AC_PARTITION_ID_LEN) <= 0) {
+        memcpy(key, a, AC_PARTITION_ID_LEN);
+        memcpy(key + AC_PARTITION_ID_LEN, b, AC_PARTITION_ID_LEN);
+    } else {
+        memcpy(key, b, AC_PARTITION_ID_LEN);
+        memcpy(key + AC_PARTITION_ID_LEN, a, AC_PARTITION_ID_LEN);
     }
-    return -1;
+}
+
+/* Find mutable partition record via hashmap */
+static ac_partition_record_t *find_mut(ac_partition_store_t *ps,
+                                       const uint8_t id[AC_PARTITION_ID_LEN])
+{
+    ac_partition_record_t *rec;
+    rec = (ac_partition_record_t *)ac_hashmap_get(&ps->partition_map,
+                                                   id, AC_PARTITION_ID_LEN);
+    if (rec && rec->active)
+        return rec;
+    return NULL;
+}
+
+/* Find cross-rule by composite key (canonical order handles both orderings) */
+static ac_cross_rule_t *find_cross_rule(const ac_partition_store_t *ps,
+                                        const uint8_t a[AC_PARTITION_ID_LEN],
+                                        const uint8_t b[AC_PARTITION_ID_LEN])
+{
+    uint8_t key[AC_CROSS_RULE_KEY_LEN];
+    make_cross_key(key, a, b);
+    return (ac_cross_rule_t *)ac_hashmap_get(&ps->cross_rule_map,
+                                              key, AC_CROSS_RULE_KEY_LEN);
+}
+
+/* Grow the subnet_ids dynamic array (alloc new, copy, free old) */
+static int grow_subnet_ids(ac_partition_record_t *rec)
+{
+    uint32_t new_cap = rec->subnet_capacity * 2;
+    uint8_t (*new_ids)[AC_SUBNET_ID_LEN];
+
+    if (new_cap == 0)
+        new_cap = AC_PARTITION_SUBNET_INIT_CAP;
+
+    new_ids = ac_zalloc(new_cap * AC_SUBNET_ID_LEN, AC_MEM_NORMAL);
+    if (!new_ids)
+        return AC_ERR_NOMEM;
+
+    if (rec->subnet_ids) {
+        memcpy(new_ids, rec->subnet_ids,
+               rec->subnet_count * AC_SUBNET_ID_LEN);
+        ac_free(rec->subnet_ids);
+    }
+
+    rec->subnet_ids = new_ids;
+    rec->subnet_capacity = new_cap;
+    return AC_OK;
 }
 
 /* ================================================================== */
@@ -82,19 +116,25 @@ static int validate_partition_tx(const ac_partition_store_t *ps,
             ac_log(AC_LOG_WARN, "validate: partition already exists");
             return AC_ERR_EXIST;
         }
-        /* VLAN ID uniqueness (N16) */
+        /* VLAN ID uniqueness (N16): iterate partition_map */
         if (pt->vlan_id != 0) {
-            uint32_t i;
-            for (i = 0; i < ps->partition_count; i++) {
-                if (ps->partitions[i].active &&
-                    ps->partitions[i].vlan_id == pt->vlan_id) {
-                    ac_log(AC_LOG_WARN, "validate: VLAN ID %u already in use",
+            ac_hashmap_iter_t vit;
+            const void *vk;
+            uint32_t vkl;
+            void *vv;
+            ac_hashmap_iter_init(&vit, (ac_hashmap_t *)&ps->partition_map);
+            while (ac_hashmap_iter_next(&vit, &vk, &vkl, &vv)) {
+                ac_partition_record_t *p = (ac_partition_record_t *)vv;
+                if (p->active && p->vlan_id == pt->vlan_id) {
+                    ac_log(AC_LOG_WARN,
+                           "validate: VLAN ID %u already in use",
                            pt->vlan_id);
                     return AC_ERR_CONFLICT;
                 }
             }
         }
-        if (ps->partition_count >= AC_MAX_PARTITIONS) {
+        if (ps->max_partitions > 0 &&
+            ps->partition_count >= ps->max_partitions) {
             ac_log(AC_LOG_WARN, "validate: partition table full");
             return AC_ERR_NOMEM;
         }
@@ -113,10 +153,6 @@ static int validate_partition_tx(const ac_partition_store_t *ps,
         if (!rec) {
             ac_log(AC_LOG_WARN, "validate: partition not found for ADD_SUBNET");
             return AC_ERR_NOENT;
-        }
-        if (rec->subnet_count >= AC_MAX_PARTITION_SUBNETS) {
-            ac_log(AC_LOG_WARN, "validate: partition subnet list full");
-            return AC_ERR_NOMEM;
         }
         /* Check subnet not already in this partition */
         {
@@ -170,9 +206,14 @@ static int validate_partition_tx(const ac_partition_store_t *ps,
             return AC_ERR_NOENT;
         }
         if (pt->action == AC_PART_ALLOW_CROSS &&
-            ps->cross_rule_count >= AC_MAX_CROSS_RULES) {
-            ac_log(AC_LOG_WARN, "validate: cross-rule table full");
-            return AC_ERR_NOMEM;
+            ps->max_cross_rules > 0 &&
+            ps->cross_rule_count >= ps->max_cross_rules) {
+            /* Only reject if rule doesn't already exist */
+            if (!find_cross_rule(ps, pt->partition_id,
+                                  pt->target_partition_id)) {
+                ac_log(AC_LOG_WARN, "validate: cross-rule table full");
+                return AC_ERR_NOMEM;
+            }
         }
         break;
 
@@ -197,15 +238,31 @@ static void apply_partition_tx(ac_partition_store_t *ps,
 
     switch (pt->action) {
     case AC_PART_CREATE:
-        rec = &ps->partitions[ps->partition_count];
-        memset(rec, 0, sizeof(*rec));
-        memcpy(rec->partition_id, pt->partition_id, AC_PARTITION_ID_LEN);
-        rec->vlan_id = pt->vlan_id;
-        memcpy(rec->creator, creator, AC_PUBKEY_LEN);
-        rec->created_block = block_index;
-        rec->active = 1;
-        ps->partition_count++;
-        ac_log(AC_LOG_INFO, "partition created: %.31s", pt->partition_id);
+        {
+            rec = (ac_partition_record_t *)ac_zalloc(sizeof(*rec),
+                                                      AC_MEM_NORMAL);
+            if (!rec) {
+                ac_log(AC_LOG_ERROR, "partition alloc failed");
+                return;
+            }
+            memcpy(rec->partition_id, pt->partition_id, AC_PARTITION_ID_LEN);
+            rec->vlan_id = pt->vlan_id;
+            memcpy(rec->creator, creator, AC_PUBKEY_LEN);
+            rec->created_block = block_index;
+            rec->active = 1;
+            rec->subnet_ids = NULL;
+            rec->subnet_count = 0;
+            rec->subnet_capacity = 0;
+
+            if (ac_hashmap_put(&ps->partition_map, pt->partition_id,
+                               AC_PARTITION_ID_LEN, rec, NULL) != AC_OK) {
+                ac_free(rec);
+                ac_log(AC_LOG_ERROR, "partition hashmap put failed");
+                return;
+            }
+            ps->partition_count++;
+            ac_log(AC_LOG_INFO, "partition created: %.31s", pt->partition_id);
+        }
         break;
 
     case AC_PART_DELETE:
@@ -218,7 +275,13 @@ static void apply_partition_tx(ac_partition_store_t *ps,
 
     case AC_PART_ADD_SUBNET:
         rec = find_mut(ps, pt->partition_id);
-        if (rec && rec->subnet_count < AC_MAX_PARTITION_SUBNETS) {
+        if (rec) {
+            if (rec->subnet_count >= rec->subnet_capacity) {
+                if (grow_subnet_ids(rec) != AC_OK) {
+                    ac_log(AC_LOG_ERROR, "subnet array grow failed");
+                    return;
+                }
+            }
             memcpy(rec->subnet_ids[rec->subnet_count],
                    pt->target_subnet_id, AC_SUBNET_ID_LEN);
             rec->subnet_count++;
@@ -234,7 +297,6 @@ static void apply_partition_tx(ac_partition_store_t *ps,
             for (i = 0; i < rec->subnet_count; i++) {
                 if (id_eq(rec->subnet_ids[i], pt->target_subnet_id,
                           AC_SUBNET_ID_LEN)) {
-                    /* Shift remaining entries */
                     if (i < rec->subnet_count - 1) {
                         memmove(rec->subnet_ids[i], rec->subnet_ids[i + 1],
                                 (rec->subnet_count - 1 - i) * AC_SUBNET_ID_LEN);
@@ -250,30 +312,48 @@ static void apply_partition_tx(ac_partition_store_t *ps,
 
     case AC_PART_ALLOW_CROSS:
         {
-            int idx = find_cross_rule(ps, pt->partition_id,
-                                      pt->target_partition_id);
-            if (idx >= 0) {
-                ps->cross_rules[idx].allowed = 1;
-            } else if (ps->cross_rule_count < AC_MAX_CROSS_RULES) {
-                ac_cross_rule_t *rule = &ps->cross_rules[ps->cross_rule_count];
-                memcpy(rule->partition_a, pt->partition_id, AC_PARTITION_ID_LEN);
+            ac_cross_rule_t *rule = find_cross_rule(ps, pt->partition_id,
+                                                     pt->target_partition_id);
+            if (rule) {
+                rule->allowed = 1;
+            } else {
+                uint8_t key[AC_CROSS_RULE_KEY_LEN];
+                rule = (ac_cross_rule_t *)ac_zalloc(sizeof(*rule),
+                                                     AC_MEM_NORMAL);
+                if (!rule) {
+                    ac_log(AC_LOG_ERROR, "cross-rule alloc failed");
+                    return;
+                }
+                memcpy(rule->partition_a, pt->partition_id,
+                       AC_PARTITION_ID_LEN);
                 memcpy(rule->partition_b, pt->target_partition_id,
                        AC_PARTITION_ID_LEN);
                 rule->allowed = 1;
+                make_cross_key(key, pt->partition_id,
+                               pt->target_partition_id);
+                if (ac_hashmap_put(&ps->cross_rule_map, key,
+                                   AC_CROSS_RULE_KEY_LEN,
+                                   rule, NULL) != AC_OK) {
+                    ac_free(rule);
+                    ac_log(AC_LOG_ERROR, "cross-rule hashmap put failed");
+                    return;
+                }
                 ps->cross_rule_count++;
             }
-            ac_log(AC_LOG_INFO, "cross-partition traffic ALLOWED: %.31s <-> %.31s",
+            ac_log(AC_LOG_INFO,
+                   "cross-partition traffic ALLOWED: %.31s <-> %.31s",
                    pt->partition_id, pt->target_partition_id);
         }
         break;
 
     case AC_PART_DENY_CROSS:
         {
-            int idx = find_cross_rule(ps, pt->partition_id,
-                                      pt->target_partition_id);
-            if (idx >= 0) {
-                ps->cross_rules[idx].allowed = 0;
-                ac_log(AC_LOG_INFO, "cross-partition traffic DENIED: %.31s <-> %.31s",
+            ac_cross_rule_t *rule = find_cross_rule(ps, pt->partition_id,
+                                                     pt->target_partition_id);
+            if (rule) {
+                rule->allowed = 0;
+                ac_log(AC_LOG_INFO,
+                       "cross-partition traffic DENIED: %.31s <-> %.31s",
                        pt->partition_id, pt->target_partition_id);
             }
         }
@@ -285,16 +365,72 @@ static void apply_partition_tx(ac_partition_store_t *ps,
 }
 
 /* ================================================================== */
+/*  Free helpers                                                       */
+/* ================================================================== */
+
+static void free_all_partitions(ac_partition_store_t *ps)
+{
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
+    ac_hashmap_iter_init(&it, &ps->partition_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_partition_record_t *rec = (ac_partition_record_t *)v;
+        if (rec->subnet_ids)
+            ac_free(rec->subnet_ids);
+        ac_free(rec);
+    }
+}
+
+static void free_all_cross_rules(ac_partition_store_t *ps)
+{
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
+    ac_hashmap_iter_init(&it, &ps->cross_rule_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v))
+        ac_free(v);
+}
+
+/* ================================================================== */
 /*  Public API                                                         */
 /* ================================================================== */
 
-int ac_partition_init(ac_partition_store_t *ps)
+int ac_partition_init(ac_partition_store_t *ps,
+                      uint32_t max_partitions,
+                      uint32_t max_cross_rules)
 {
+    int rc;
+
     if (!ps)
         return AC_ERR_INVAL;
 
     memset(ps, 0, sizeof(*ps));
-    ac_mutex_init(&ps->lock);
+
+    rc = ac_mutex_init(&ps->lock);
+    if (rc != AC_OK)
+        return rc;
+
+    ps->max_partitions = max_partitions;
+    ps->max_cross_rules = max_cross_rules;
+
+    rc = ac_hashmap_init(&ps->partition_map, 64, max_partitions);
+    if (rc != AC_OK) {
+        ac_mutex_destroy(&ps->lock);
+        return rc;
+    }
+
+    rc = ac_hashmap_init(&ps->cross_rule_map, 64, max_cross_rules);
+    if (rc != AC_OK) {
+        ac_hashmap_destroy(&ps->partition_map);
+        ac_mutex_destroy(&ps->lock);
+        return rc;
+    }
+
     ac_log(AC_LOG_INFO, "partition store initialized");
     return AC_OK;
 }
@@ -303,8 +439,20 @@ void ac_partition_destroy(ac_partition_store_t *ps)
 {
     if (!ps)
         return;
+
+    ac_mutex_lock(&ps->lock);
+
+    free_all_partitions(ps);
+    ac_hashmap_destroy(&ps->partition_map);
+
+    free_all_cross_rules(ps);
+    ac_hashmap_destroy(&ps->cross_rule_map);
+
+    ps->partition_count = 0;
+    ps->cross_rule_count = 0;
+
+    ac_mutex_unlock(&ps->lock);
     ac_mutex_destroy(&ps->lock);
-    memset(ps, 0, sizeof(*ps));
     ac_log(AC_LOG_INFO, "partition store destroyed");
 }
 
@@ -359,16 +507,16 @@ const ac_partition_record_t *ac_partition_find(
     const ac_partition_store_t *ps,
     const uint8_t partition_id[AC_PARTITION_ID_LEN])
 {
-    uint32_t i;
+    ac_partition_record_t *rec;
+
     if (!ps || !partition_id)
         return NULL;
 
-    for (i = 0; i < ps->partition_count; i++) {
-        if (ps->partitions[i].active &&
-            id_eq(ps->partitions[i].partition_id, partition_id,
-                  AC_PARTITION_ID_LEN))
-            return &ps->partitions[i];
-    }
+    rec = (ac_partition_record_t *)ac_hashmap_get(&ps->partition_map,
+                                                   partition_id,
+                                                   AC_PARTITION_ID_LEN);
+    if (rec && rec->active)
+        return rec;
     return NULL;
 }
 
@@ -376,17 +524,18 @@ int ac_partition_allowed(const ac_partition_store_t *ps,
                          const uint8_t part_a[AC_PARTITION_ID_LEN],
                          const uint8_t part_b[AC_PARTITION_ID_LEN])
 {
-    int idx;
+    ac_cross_rule_t *rule;
+
     if (!ps || !part_a || !part_b)
-        return 0; /* deny by default */
+        return 0;
 
     /* Same partition is always allowed */
     if (id_eq(part_a, part_b, AC_PARTITION_ID_LEN))
         return 1;
 
-    idx = find_cross_rule(ps, part_a, part_b);
-    if (idx >= 0)
-        return ps->cross_rules[idx].allowed;
+    rule = find_cross_rule(ps, part_a, part_b);
+    if (rule)
+        return rule->allowed;
 
     return 0; /* deny by default (N22) */
 }
@@ -395,17 +544,23 @@ const ac_partition_record_t *ac_partition_for_subnet(
     const ac_partition_store_t *ps,
     const uint8_t subnet_id[AC_SUBNET_ID_LEN])
 {
-    uint32_t i, j;
+    ac_hashmap_iter_t it;
+    const void *k;
+    uint32_t kl;
+    void *v;
+
     if (!ps || !subnet_id)
         return NULL;
 
-    for (i = 0; i < ps->partition_count; i++) {
-        if (!ps->partitions[i].active)
+    ac_hashmap_iter_init(&it, (ac_hashmap_t *)&ps->partition_map);
+    while (ac_hashmap_iter_next(&it, &k, &kl, &v)) {
+        ac_partition_record_t *rec = (ac_partition_record_t *)v;
+        uint32_t j;
+        if (!rec->active)
             continue;
-        for (j = 0; j < ps->partitions[i].subnet_count; j++) {
-            if (id_eq(ps->partitions[i].subnet_ids[j], subnet_id,
-                      AC_SUBNET_ID_LEN))
-                return &ps->partitions[i];
+        for (j = 0; j < rec->subnet_count; j++) {
+            if (id_eq(rec->subnet_ids[j], subnet_id, AC_SUBNET_ID_LEN))
+                return rec;
         }
     }
     return NULL;
@@ -429,11 +584,20 @@ int ac_partition_rebuild(ac_partition_store_t *ps,
 
     ac_mutex_lock(&ps->lock);
 
+    /* Free existing records and clear hashmaps */
+    free_all_partitions(ps);
+    ac_hashmap_destroy(&ps->partition_map);
+
+    free_all_cross_rules(ps);
+    ac_hashmap_destroy(&ps->cross_rule_map);
+
     ps->partition_count = 0;
     ps->cross_rule_count = 0;
-    memset(ps->partitions, 0, sizeof(ps->partitions));
-    memset(ps->cross_rules, 0, sizeof(ps->cross_rules));
 
+    ac_hashmap_init(&ps->partition_map, 64, ps->max_partitions);
+    ac_hashmap_init(&ps->cross_rule_map, 64, ps->max_cross_rules);
+
+    /* Replay all blocks */
     for (i = 0; i < block_count; i++) {
         uint16_t j;
         const ac_block_t *blk = &blocks[i];
@@ -447,7 +611,8 @@ int ac_partition_rebuild(ac_partition_store_t *ps,
     }
 
     ac_mutex_unlock(&ps->lock);
-    ac_log(AC_LOG_INFO, "partition store rebuilt: %u partitions, %u cross-rules",
+    ac_log(AC_LOG_INFO,
+           "partition store rebuilt: %u partitions, %u cross-rules",
            ps->partition_count, ps->cross_rule_count);
     return AC_OK;
 }

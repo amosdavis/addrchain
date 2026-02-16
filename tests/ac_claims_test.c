@@ -86,7 +86,7 @@ static void test_claims_init_destroy(void)
     int rc;
     TEST("claim store init and destroy");
 
-    rc = ac_claims_init(&cs, 0);
+    rc = ac_claims_init(&cs, 0, 0);
     ASSERT_OK(rc, "init should succeed");
     ASSERT_EQ(ac_claims_count(&cs), 0, "should start empty");
 
@@ -103,7 +103,7 @@ static void test_claims_apply_claim(void)
     int rc;
     TEST("apply CLAIM tx creates ownership");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -137,7 +137,7 @@ static void test_claims_conflict_detection(void)
     int rc;
     TEST("conflict: second CLAIM for same address rejected");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub1, priv1);
     make_keypair(pub2, priv2);
     ac_genesis_block(&genesis);
@@ -165,7 +165,7 @@ static void test_claims_release(void)
     int rc;
     TEST("RELEASE frees an address");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -192,7 +192,7 @@ static void test_claims_renew(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("RENEW extends lease");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -214,7 +214,7 @@ static void test_claims_lease_expiry(void)
     uint8_t pub[AC_PUBKEY_LEN], priv[64];
     TEST("lease expiry removes claim");
 
-    ac_claims_init(&cs, 5); /* 5-block lease for fast expiry */
+    ac_claims_init(&cs, 5, 0); /* 5-block lease for fast expiry */
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -242,7 +242,7 @@ static void test_claims_release_non_owner(void)
     int rc;
     TEST("RELEASE by non-owner rejected in validation");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub1, priv1);
     make_keypair(pub2, priv2);
     ac_genesis_block(&genesis);
@@ -269,7 +269,7 @@ static void test_claims_multiple_addresses(void)
     uint32_t count;
     TEST("multiple addresses per node");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub, priv);
     ac_genesis_block(&genesis);
 
@@ -303,7 +303,7 @@ static void test_claims_rebuild(void)
     int rc;
     TEST("rebuild from chain");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub, priv);
 
     /* Build a small chain */
@@ -331,7 +331,7 @@ static void test_claims_rollback_detection(void)
     int rc;
     TEST("rollback detection: lost claims identified");
 
-    ac_claims_init(&cs, 1000);
+    ac_claims_init(&cs, 1000, 0);
     make_keypair(pub, priv);
 
     /* Build chain with 2 claims */
@@ -360,7 +360,7 @@ static void test_claims_null_safety(void)
     int rc;
     TEST("NULL parameter safety (K01)");
 
-    rc = ac_claims_init(NULL, 0);
+    rc = ac_claims_init(NULL, 0, 0);
     ASSERT_NE(rc, AC_OK, "init(NULL) should fail");
 
     rc = ac_claims_get_owner(NULL, NULL, NULL);
