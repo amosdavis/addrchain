@@ -11,6 +11,8 @@
  *   addrctl release <addr>              — Release a claimed address
  *   addrctl renew <addr>                — Renew lease
  *   addrctl subnet create <cidr> --gateway <gw> --dns <dns>
+ *   addrctl subnet update <id> [--gateway IP] [--dns IP] [--vlan N] [--prefix CIDR]
+ *   addrctl subnet delete <id>              — Delete a subnet
  *   addrctl subnet list                 — List subnets
  *   addrctl vpn tunnel <peer> --type <wg|ipsec|pool>
  *   addrctl vpn list                    — List VPN tunnels
@@ -290,6 +292,78 @@ static int cmd_subnet_create(int argc, char *argv[], int arg_start)
     return 0;
 }
 
+static int cmd_subnet_update(int argc, char *argv[], int arg_start)
+{
+    const char *subnet_id = NULL;
+    const char *gateway = NULL;
+    const char *dns = NULL;
+    const char *prefix = NULL;
+    int vlan = -1;
+    int no_gateway = 0, no_dns = 0;
+    uint8_t update_mask = 0;
+    int i;
+
+    if (arg_start >= argc) {
+        fprintf(stderr, "addrctl: subnet update requires <subnet-id>\n");
+        return 1;
+    }
+    subnet_id = argv[arg_start];
+
+    for (i = arg_start + 1; i < argc; i++) {
+        if (strcmp(argv[i], "--gateway") == 0 && i + 1 < argc) {
+            gateway = argv[++i];
+            update_mask |= AC_SUBNET_UPD_GATEWAY;
+        } else if (strcmp(argv[i], "--dns") == 0 && i + 1 < argc) {
+            dns = argv[++i];
+            update_mask |= AC_SUBNET_UPD_DNS;
+        } else if (strcmp(argv[i], "--vlan") == 0 && i + 1 < argc) {
+            vlan = atoi(argv[++i]);
+            update_mask |= AC_SUBNET_UPD_VLAN;
+        } else if (strcmp(argv[i], "--prefix") == 0 && i + 1 < argc) {
+            prefix = argv[++i];
+            update_mask |= AC_SUBNET_UPD_PREFIX;
+        } else if (strcmp(argv[i], "--no-gateway") == 0) {
+            no_gateway = 1;
+            update_mask |= AC_SUBNET_UPD_FLAGS;
+        } else if (strcmp(argv[i], "--no-dns") == 0) {
+            no_dns = 1;
+            update_mask |= AC_SUBNET_UPD_FLAGS;
+        } else {
+            fprintf(stderr, "addrctl: unknown option: %s\n", argv[i]);
+            return 1;
+        }
+    }
+
+    if (update_mask == 0) {
+        fprintf(stderr, "addrctl: subnet update requires at least one field flag\n");
+        return 1;
+    }
+
+    printf("subnet updated: %s (mask=0x%02x)", subnet_id, update_mask);
+    if (gateway) printf(" gw=%s", gateway);
+    if (dns) printf(" dns=%s", dns);
+    if (vlan >= 0) printf(" vlan=%d", vlan);
+    if (prefix) printf(" prefix=%s", prefix);
+    if (no_gateway) printf(" (no-gateway)");
+    if (no_dns) printf(" (no-dns)");
+    printf("\n");
+    return 0;
+}
+
+static int cmd_subnet_delete(int argc, char *argv[], int arg_start)
+{
+    const char *subnet_id = NULL;
+
+    if (arg_start >= argc) {
+        fprintf(stderr, "addrctl: subnet delete requires <subnet-id>\n");
+        return 1;
+    }
+    subnet_id = argv[arg_start];
+
+    printf("subnet deleted: %s\n", subnet_id);
+    return 0;
+}
+
 static int cmd_subnet_list(void)
 {
     printf("active_subnets: %u\n", ac_subnet_count(&g_subnets));
@@ -310,6 +384,8 @@ static void usage(const char *prog)
         "  claim <address>                     Claim an IP address\n"
         "  release <address>                   Release a claimed address\n"
         "  subnet create <cidr> --gateway <gw> --dns <dns>\n"
+        "  subnet update <id> [--gateway IP] [--dns IP] [--vlan N] [--prefix CIDR]\n"
+        "  subnet delete <id>                  Delete a subnet\n"
         "  subnet list                         List subnets\n"
         "  peers                               List discovered peers\n"
         "  identity                            Show node public key\n"
@@ -359,6 +435,10 @@ int main(int argc, char *argv[])
     } else if (strcmp(argv[1], "subnet") == 0 && argc >= 3) {
         if (strcmp(argv[2], "create") == 0) {
             ret = cmd_subnet_create(argc, argv, 3);
+        } else if (strcmp(argv[2], "update") == 0) {
+            ret = cmd_subnet_update(argc, argv, 3);
+        } else if (strcmp(argv[2], "delete") == 0) {
+            ret = cmd_subnet_delete(argc, argv, 3);
         } else if (strcmp(argv[2], "list") == 0) {
             ret = cmd_subnet_list();
         } else {

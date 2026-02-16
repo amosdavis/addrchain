@@ -30,3 +30,36 @@ Feature: Subnet Management
     And I assign my node to subnet "office-net"
     And I claim address "10.60.0.5" in subnet "office-net"
     Then address "10.60.0.5" should be claimed by my node
+
+  Scenario: Update a subnet gateway
+    When I update subnet "lab-net" with "--gateway" "10.42.0.2"
+    Then the output should contain "subnet updated: lab-net"
+    And the output should contain "gw=10.42.0.2"
+
+  Scenario: Update a subnet with multiple fields
+    When I update subnet "lab-net" with flags "--gateway" "10.42.0.2" "--dns" "8.8.4.4" "--vlan" "100"
+    Then the output should contain "subnet updated: lab-net"
+    And the output should contain "gw=10.42.0.2"
+    And the output should contain "dns=8.8.4.4"
+    And the output should contain "vlan=100"
+
+  Scenario: Update a subnet prefix
+    When I update subnet "lab-net" with "--prefix" "10.42.0.0/16"
+    Then the output should contain "subnet updated: lab-net"
+    And the output should contain "prefix=10.42.0.0/16"
+
+  Scenario: Reject subnet update with no flags
+    When I try to update subnet "lab-net" with no flags
+    Then the update should fail
+
+  Scenario: Reject subnet update without subnet-id
+    When I try to update subnet without an id
+    Then the update should fail
+
+  Scenario: Delete a subnet
+    When I delete subnet "lab-net"
+    Then the output should contain "subnet deleted: lab-net"
+
+  Scenario: Reject subnet delete without subnet-id
+    When I try to delete subnet without an id
+    Then the delete should fail

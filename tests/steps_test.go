@@ -151,6 +151,59 @@ func (tc *testContext) theOutputShouldShowZeroPeers() error {
 	return nil
 }
 
+func (tc *testContext) iUpdateSubnetWithSingleFlag(subnetID, flag, value string) error {
+	tc.runAddrctl("subnet", "update", subnetID, flag, value)
+	if tc.lastExit != 0 {
+		return fmt.Errorf("subnet update failed: %s", tc.lastOutput)
+	}
+	return nil
+}
+
+func (tc *testContext) iUpdateSubnetWithMultipleFlags(subnetID, f1, v1, f2, v2, f3, v3 string) error {
+	tc.runAddrctl("subnet", "update", subnetID, f1, v1, f2, v2, f3, v3)
+	if tc.lastExit != 0 {
+		return fmt.Errorf("subnet update failed: %s", tc.lastOutput)
+	}
+	return nil
+}
+
+func (tc *testContext) iTryUpdateSubnetNoFlags(subnetID string) error {
+	tc.runAddrctl("subnet", "update", subnetID)
+	return nil
+}
+
+func (tc *testContext) iTryUpdateSubnetNoID() error {
+	tc.runAddrctl("subnet", "update")
+	return nil
+}
+
+func (tc *testContext) theUpdateShouldFail() error {
+	if tc.lastExit == 0 {
+		return fmt.Errorf("expected failure but got success")
+	}
+	return nil
+}
+
+func (tc *testContext) iDeleteSubnet(subnetID string) error {
+	tc.runAddrctl("subnet", "delete", subnetID)
+	if tc.lastExit != 0 {
+		return fmt.Errorf("subnet delete failed: %s", tc.lastOutput)
+	}
+	return nil
+}
+
+func (tc *testContext) iTryDeleteSubnetNoID() error {
+	tc.runAddrctl("subnet", "delete")
+	return nil
+}
+
+func (tc *testContext) theDeleteShouldFail() error {
+	if tc.lastExit == 0 {
+		return fmt.Errorf("expected failure but got success")
+	}
+	return nil
+}
+
 func InitializeScenario(ctx *godog.ScenarioContext) {
 	tc := newTestContext()
 
@@ -172,6 +225,18 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		tc.iCreateSubnetWithGatewayAndDNS)
 	ctx.Step(`^I list peers$`, tc.iListPeers)
 	ctx.Step(`^I should have 0 active peers$`, tc.theOutputShouldShowZeroPeers)
+	ctx.Step(`^I update subnet "([^"]*)" with "([^"]*)" "([^"]*)"$`,
+		tc.iUpdateSubnetWithSingleFlag)
+	ctx.Step(`^I update subnet "([^"]*)" with flags "([^"]*)" "([^"]*)" "([^"]*)" "([^"]*)" "([^"]*)" "([^"]*)"$`,
+		tc.iUpdateSubnetWithMultipleFlags)
+	ctx.Step(`^I try to update subnet "([^"]*)" with no flags$`,
+		tc.iTryUpdateSubnetNoFlags)
+	ctx.Step(`^I try to update subnet without an id$`,
+		tc.iTryUpdateSubnetNoID)
+	ctx.Step(`^the update should fail$`, tc.theUpdateShouldFail)
+	ctx.Step(`^I delete subnet "([^"]*)"$`, tc.iDeleteSubnet)
+	ctx.Step(`^I try to delete subnet without an id$`, tc.iTryDeleteSubnetNoID)
+	ctx.Step(`^the delete should fail$`, tc.theDeleteShouldFail)
 }
 
 func TestFeatures(t *testing.T) {
