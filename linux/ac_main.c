@@ -282,25 +282,25 @@ static int __init ac_module_init(void)
     ac_mutex_init(&ac_chain_lock);
 
     /* Step 3: Subsystems — K08: init in lock order */
-    ret = ac_claims_init(&ac_claims, AC_DEFAULT_LEASE_BLOCKS);
+    ret = ac_claims_init(&ac_claims, AC_DEFAULT_LEASE_BLOCKS, 0);
     if (ret != AC_OK) {
         ret = -ENOMEM;
         goto fail_claims;
     }
 
-    ret = ac_subnet_init(&ac_subnets);
+    ret = ac_subnet_init(&ac_subnets, 0, 0);
     if (ret != AC_OK) {
         ret = -ENOMEM;
         goto fail_subnets;
     }
 
-    ret = ac_partition_init(&ac_parts);
+    ret = ac_partition_init(&ac_parts, 0, 0);
     if (ret != AC_OK) {
         ret = -ENOMEM;
         goto fail_parts;
     }
 
-    ret = ac_vpn_init(&ac_vpns);
+    ret = ac_vpn_init(&ac_vpns, 0);
     if (ret != AC_OK) {
         ret = -ENOMEM;
         goto fail_vpns;
@@ -312,7 +312,7 @@ static int __init ac_module_init(void)
     memzero_explicit(seed, sizeof(seed));
 
     ret = ac_discover_init(&ac_disc, local_pubkey, AC_SYNC_PORT,
-                           AC_DISC_IPV6_MCAST | AC_DISC_IPV4_BCAST);
+                           AC_DISC_IPV6_MCAST | AC_DISC_IPV4_BCAST, 0);
     if (ret != AC_OK) {
         ret = -ENOMEM;
         goto fail_disc;

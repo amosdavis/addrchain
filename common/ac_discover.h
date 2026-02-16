@@ -13,12 +13,12 @@
 
 #include "ac_proto.h"
 #include "ac_platform.h"
+#include "ac_hashmap.h"
 
 /* ------------------------------------------------------------------ */
 /*  Limits                                                             */
 /* ------------------------------------------------------------------ */
 
-#define AC_MAX_PEERS            256
 #define AC_ANNOUNCE_INTERVAL_MS 5000    /* 5 seconds */
 #define AC_PEER_TIMEOUT_MS      30000   /* 30 seconds */
 #define AC_ANNOUNCE_RATELIMIT_MS 100    /* P18: min interval between sends */
@@ -77,8 +77,9 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    ac_peer_t       peers[AC_MAX_PEERS];
+    ac_hashmap_t    peer_map;           /* pubkey -> ac_peer_t* */
     uint32_t        peer_count;
+    uint32_t        max_peers;          /* 0 = default (256) */
 
     uint8_t         local_pubkey[AC_PUBKEY_LEN];
     uint32_t        local_chain_height;
@@ -99,7 +100,8 @@ typedef struct {
 int ac_discover_init(ac_discover_state_t *ds,
                      const uint8_t local_pubkey[AC_PUBKEY_LEN],
                      uint16_t sync_port,
-                     uint8_t methods);
+                     uint8_t methods,
+                     uint32_t max_peers);
 
 void ac_discover_destroy(ac_discover_state_t *ds);
 

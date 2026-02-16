@@ -13,6 +13,7 @@
 
 #include "ac_chain.h"
 #include "ac_crypto.h"
+#include "ac_hashmap.h"
 
 /* Initial allocation for blocks array */
 #define AC_CHAIN_INITIAL_CAP    64
@@ -603,9 +604,9 @@ int ac_chain_validate(const ac_block_t *blocks, uint32_t count)
     uint16_t j;
     int rc;
 
-    /* Nonce replay tracker — heap allocated (K06: no large stack) */
-    ac_seq_entry_t *seq_table = NULL;
-    uint32_t seq_count = 0;
+    /* Nonce replay tracker — hashmap (pubkey -> ac_seq_entry_t*) */
+    ac_hashmap_t seq_map;
+    int map_inited = 0;
 
     if (!blocks || count == 0)
         return AC_ERR_INVAL;
@@ -622,10 +623,10 @@ int ac_chain_validate(const ac_block_t *blocks, uint32_t count)
     if (count == 1)
         return AC_OK;
 
-    seq_table = (ac_seq_entry_t *)ac_zalloc(
-        AC_MAX_SEQ_ENTRIES * sizeof(ac_seq_entry_t), AC_MEM_NORMAL);
-    if (!seq_table)
+    rc = ac_hashmap_init(&seq_map, 0, 0);
+    if (rc != AC_OK)
         return AC_ERR_NOMEM;
+    map_inited = 1;
 
     for (i = 1; i < count; i++) {
         /* Validate block against predecessor + chain context */
@@ -638,35 +639,40 @@ int ac_chain_validate(const ac_block_t *blocks, uint32_t count)
         /* Nonce replay check (per-node monotonicity) */
         for (j = 0; j < blocks[i].tx_count && j < AC_MAX_TX_PER_BLOCK; j++) {
             const ac_transaction_t *tx = &blocks[i].txs[j];
-            uint32_t k;
-            int found = 0;
+            ac_seq_entry_t *entry;
 
-            for (k = 0; k < seq_count; k++) {
-                if (memcmp(seq_table[k].pubkey, tx->node_pubkey,
-                           AC_PUBKEY_LEN) == 0) {
-                    /* P05: nonce must be strictly increasing */
-                    if (tx->nonce <= seq_table[k].last_nonce &&
-                        tx->nonce != 0) {
-                        ac_log_warn("block %u tx %u: replayed nonce %u "
-                                    "(last seen %u)",
-                                    i, j, tx->nonce,
-                                    seq_table[k].last_nonce);
-                        rc = AC_ERR_INVAL;
-                        goto cleanup;
-                    }
-                    if (tx->nonce > seq_table[k].last_nonce)
-                        seq_table[k].last_nonce = tx->nonce;
-                    found = 1;
-                    break;
+            entry = (ac_seq_entry_t *)ac_hashmap_get(
+                &seq_map, tx->node_pubkey, AC_PUBKEY_LEN);
+
+            if (entry) {
+                /* P05: nonce must be strictly increasing */
+                if (tx->nonce <= entry->last_nonce &&
+                    tx->nonce != 0) {
+                    ac_log_warn("block %u tx %u: replayed nonce %u "
+                                "(last seen %u)",
+                                i, j, tx->nonce,
+                                entry->last_nonce);
+                    rc = AC_ERR_INVAL;
+                    goto cleanup;
                 }
-            }
+                if (tx->nonce > entry->last_nonce)
+                    entry->last_nonce = tx->nonce;
+            } else {
+                entry = (ac_seq_entry_t *)ac_zalloc(
+                    sizeof(*entry), AC_MEM_NORMAL);
+                if (!entry) {
+                    rc = AC_ERR_NOMEM;
+                    goto cleanup;
+                }
+                memcpy(entry->pubkey, tx->node_pubkey, AC_PUBKEY_LEN);
+                entry->last_nonce = tx->nonce;
 
-            if (!found && seq_count < AC_MAX_SEQ_ENTRIES) {
-                memcpy(seq_table[seq_count].pubkey, tx->node_pubkey,
-                       AC_PUBKEY_LEN);
-                seq_table[seq_count].last_nonce = tx->nonce;
-                seq_table[seq_count].active = 1;
-                seq_count++;
+                rc = ac_hashmap_put(&seq_map, tx->node_pubkey,
+                                    AC_PUBKEY_LEN, entry, NULL);
+                if (rc != AC_OK) {
+                    ac_free(entry);
+                    goto cleanup;
+                }
             }
         }
     }
@@ -674,7 +680,18 @@ int ac_chain_validate(const ac_block_t *blocks, uint32_t count)
     rc = AC_OK;
 
 cleanup:
-    ac_free(seq_table);
+    if (map_inited) {
+        ac_hashmap_iter_t it;
+        const void *key;
+        uint32_t key_len;
+        void *value;
+
+        ac_hashmap_iter_init(&it, &seq_map);
+        while (ac_hashmap_iter_next(&it, &key, &key_len, &value)) {
+            ac_free((ac_seq_entry_t *)value);
+        }
+        ac_hashmap_destroy(&seq_map);
+    }
     return rc;
 }
 
@@ -720,9 +737,16 @@ int ac_chain_init(ac_chain_t *chain)
     if (rc != AC_OK)
         return rc;
 
+    rc = ac_hashmap_init(&chain->seq_map, 0, 0);
+    if (rc != AC_OK) {
+        ac_mutex_destroy(&chain->lock);
+        return rc;
+    }
+
     chain->blocks = (ac_block_t *)ac_zalloc(
         AC_CHAIN_INITIAL_CAP * sizeof(ac_block_t), AC_MEM_NORMAL);
     if (!chain->blocks) {
+        ac_hashmap_destroy(&chain->seq_map);
         ac_mutex_destroy(&chain->lock);
         return AC_ERR_NOMEM;
     }
@@ -739,6 +763,11 @@ int ac_chain_init(ac_chain_t *chain)
 
 void ac_chain_destroy(ac_chain_t *chain)
 {
+    ac_hashmap_iter_t it;
+    const void *key;
+    uint32_t key_len;
+    void *value;
+
     if (!chain)
         return;
 
@@ -750,6 +779,14 @@ void ac_chain_destroy(ac_chain_t *chain)
         ac_free(chain->blocks);
         chain->blocks = NULL;  /* K02: clear pointer after free */
     }
+
+    /* Free all seq entries */
+    ac_hashmap_iter_init(&it, &chain->seq_map);
+    while (ac_hashmap_iter_next(&it, &key, &key_len, &value)) {
+        ac_free((ac_seq_entry_t *)value);
+    }
+    ac_hashmap_destroy(&chain->seq_map);
+
     chain->count = 0;
     chain->capacity = 0;
     ac_mutex_unlock(&chain->lock);

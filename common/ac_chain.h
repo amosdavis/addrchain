@@ -26,17 +26,15 @@
 
 #include "ac_proto.h"
 #include "ac_platform.h"
+#include "ac_hashmap.h"
 
 /* ------------------------------------------------------------------ */
 /*  Sequence tracker: replay protection per node (K07, N08)            */
 /* ------------------------------------------------------------------ */
 
-#define AC_MAX_SEQ_ENTRIES  256     /* max tracked node identities */
-
 typedef struct {
     uint8_t     pubkey[AC_PUBKEY_LEN];
     uint32_t    last_nonce;
-    int         active;             /* 1 = slot in use */
 } ac_seq_entry_t;
 
 /* ------------------------------------------------------------------ */
@@ -59,7 +57,7 @@ typedef struct {
     ac_mutex_t      lock;               /* K07: protects all fields     */
 
     /* Nonce replay tracker */
-    ac_seq_entry_t  seq_table[AC_MAX_SEQ_ENTRIES];
+    ac_hashmap_t    seq_map;            /* pubkey -> ac_seq_entry_t*    */
 
     /* Audit ring buffer (P49: change journaling tenet) */
     uint32_t        audit_count;        /* total state changes logged   */

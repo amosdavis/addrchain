@@ -328,20 +328,20 @@ int main(int argc, char *argv[])
     }
 
     /* Initialize subsystems */
-    ret = ac_claims_init(&g_claims, AC_DEFAULT_LEASE_BLOCKS);
+    ret = ac_claims_init(&g_claims, AC_DEFAULT_LEASE_BLOCKS, 0);
     if (ret != AC_OK) goto fail_chain;
 
-    ret = ac_subnet_init(&g_subnets);
+    ret = ac_subnet_init(&g_subnets, 0, 0);
     if (ret != AC_OK) goto fail_claims;
 
-    ret = ac_partition_init(&g_parts);
+    ret = ac_partition_init(&g_parts, 0, 0);
     if (ret != AC_OK) goto fail_subnets;
 
-    ret = ac_vpn_init(&g_vpns);
+    ret = ac_vpn_init(&g_vpns, 0);
     if (ret != AC_OK) goto fail_parts;
 
     ret = ac_discover_init(&g_disc, g_pubkey, g_config.sync_port,
-                           g_config.disc_methods);
+                           g_config.disc_methods, 0);
     if (ret != AC_OK) goto fail_vpns;
 
     /* Initialize sync and VPN modules */

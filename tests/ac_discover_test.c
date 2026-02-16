@@ -71,7 +71,7 @@ static void test_discover_init_destroy(void)
 
     make_keypair(pub, priv);
     ASSERT_OK(ac_discover_init(&ds, pub, 9877,
-                                AC_DISC_IPV4_BCAST | AC_DISC_IPV6_MCAST),
+                                AC_DISC_IPV4_BCAST | AC_DISC_IPV6_MCAST, 0),
               "init");
     ASSERT_EQ(ac_discover_peer_count(&ds), 0, "no peers");
 
@@ -88,7 +88,7 @@ static void test_discover_build_announce(void)
     TEST("build announce payload");
 
     make_keypair(pub, priv);
-    ac_discover_init(&ds, pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(tip, 0xAB, AC_HASH_LEN);
     ac_discover_update_local(&ds, 42, tip, AC_CAP_POOL);
@@ -119,7 +119,7 @@ static void test_discover_process_peer(void)
 
     make_keypair(local_pub, local_priv);
     make_keypair(peer_pub, peer_priv);
-    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = AC_VERSION;
@@ -145,7 +145,7 @@ static void test_discover_self_drop(void)
     TEST("self-announce dropped (P19)");
 
     make_keypair(pub, priv);
-    ac_discover_init(&ds, pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = AC_VERSION;
@@ -171,7 +171,7 @@ static void test_discover_update_existing(void)
 
     make_keypair(local_pub, local_priv);
     make_keypair(peer_pub, peer_priv);
-    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = AC_VERSION;
@@ -210,7 +210,7 @@ static void test_discover_best_peer(void)
     make_keypair(local_pub, local_priv);
     make_keypair(pub1, priv1);
     make_keypair(pub2, priv2);
-    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = AC_VERSION;
@@ -245,7 +245,7 @@ static void test_discover_failure_marking(void)
 
     make_keypair(local_pub, local_priv);
     make_keypair(peer_pub, peer_priv);
-    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = AC_VERSION;
@@ -280,7 +280,7 @@ static void test_discover_static_peer(void)
     TEST("static peer never evicted on prune");
 
     make_keypair(pub, priv);
-    ac_discover_init(&ds, pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     set_ipv4(&addr, 10, 0, 0, 99);
     ASSERT_OK(ac_discover_add_static_peer(&ds, &addr, 9877), "add static");
@@ -304,7 +304,7 @@ static void test_discover_prune_stale(void)
 
     make_keypair(local_pub, local_priv);
     make_keypair(peer_pub, peer_priv);
-    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = AC_VERSION;
@@ -336,7 +336,7 @@ static void test_discover_version_mismatch(void)
 
     make_keypair(local_pub, local_priv);
     make_keypair(peer_pub, peer_priv);
-    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST);
+    ac_discover_init(&ds, local_pub, 9877, AC_DISC_IPV4_BCAST, 0);
 
     memset(&ann, 0, sizeof(ann));
     ann.version = 0xFF00; /* wrong major version */
@@ -355,7 +355,7 @@ static void test_discover_null_safety(void)
 {
     TEST("NULL parameter safety (K01)");
 
-    ASSERT_NE(ac_discover_init(NULL, NULL, 0, 0), AC_OK, "init(NULL)");
+    ASSERT_NE(ac_discover_init(NULL, NULL, 0, 0, 0), AC_OK, "init(NULL)");
     ASSERT_EQ(ac_discover_peer_count(NULL), 0, "count(NULL)");
     ASSERT_EQ((uintptr_t)ac_discover_best_peer(NULL), (uintptr_t)NULL, "best(NULL)");
 

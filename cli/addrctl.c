@@ -338,12 +338,12 @@ int main(int argc, char *argv[])
 
     /* Initialize subsystems */
     ac_chain_init(&g_chain);
-    ac_claims_init(&g_claims, AC_DEFAULT_LEASE_BLOCKS);
-    ac_subnet_init(&g_subnets);
-    ac_partition_init(&g_parts);
-    ac_vpn_init(&g_vpns);
+    ac_claims_init(&g_claims, AC_DEFAULT_LEASE_BLOCKS, 0);
+    ac_subnet_init(&g_subnets, 0, 0);
+    ac_partition_init(&g_parts, 0, 0);
+    ac_vpn_init(&g_vpns, 0);
     ac_discover_init(&g_disc, g_pubkey, AC_SYNC_PORT,
-                     AC_DISC_IPV4_BCAST);
+                     AC_DISC_IPV4_BCAST, 0);
 
     /* Dispatch command */
     if (strcmp(argv[1], "status") == 0) {
