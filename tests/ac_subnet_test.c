@@ -580,6 +580,561 @@ static void test_subnet_empty_id_rejected(void)
 }
 
 /* ================================================================== */
+/*  Helpers: SUBNET_UPDATE / SUBNET_DELETE block builders              */
+/* ================================================================== */
+
+static void make_subnet_update_block(ac_block_t *blk,
+                                     const ac_block_t *prev,
+                                     const uint8_t pub[AC_PUBKEY_LEN],
+                                     const uint8_t priv[64],
+                                     const char *subnet_id,
+                                     uint8_t update_mask,
+                                     const ac_address_t *prefix,
+                                     const ac_address_t *gateway,
+                                     const ac_address_t *dns,
+                                     uint8_t dns_count,
+                                     uint16_t vlan_id,
+                                     uint8_t flags,
+                                     uint32_t nonce)
+{
+    ac_transaction_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.type = AC_TX_SUBNET_UPDATE;
+    memcpy(tx.node_pubkey, pub, AC_PUBKEY_LEN);
+    tx.timestamp = ac_time_unix_sec();
+    tx.nonce = nonce;
+
+    {
+        ac_tx_subnet_update_t *su = &tx.payload.subnet_update;
+        size_t len = strlen(subnet_id);
+        if (len >= AC_SUBNET_ID_LEN)
+            len = AC_SUBNET_ID_LEN - 1;
+        memcpy(su->subnet_id, subnet_id, len);
+        su->update_mask = update_mask;
+        if (prefix)
+            su->prefix = *prefix;
+        if (gateway)
+            su->gateway = *gateway;
+        if (dns && dns_count > 0) {
+            uint8_t i;
+            for (i = 0; i < dns_count && i < AC_MAX_DNS_ADDRS; i++)
+                su->dns[i] = dns[i];
+        }
+        su->dns_count = dns_count;
+        su->vlan_id = vlan_id;
+        su->flags = flags;
+    }
+
+    ac_tx_sign(&tx, priv);
+    ac_block_create(prev, &tx, 1, blk);
+}
+
+static void make_subnet_delete_block(ac_block_t *blk,
+                                     const ac_block_t *prev,
+                                     const uint8_t pub[AC_PUBKEY_LEN],
+                                     const uint8_t priv[64],
+                                     const char *subnet_id,
+                                     uint32_t nonce)
+{
+    ac_transaction_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.type = AC_TX_SUBNET_DELETE;
+    memcpy(tx.node_pubkey, pub, AC_PUBKEY_LEN);
+    tx.timestamp = ac_time_unix_sec();
+    tx.nonce = nonce;
+
+    {
+        ac_tx_subnet_delete_t *sd = &tx.payload.subnet_delete;
+        size_t len = strlen(subnet_id);
+        if (len >= AC_SUBNET_ID_LEN)
+            len = AC_SUBNET_ID_LEN - 1;
+        memcpy(sd->subnet_id, subnet_id, len);
+    }
+
+    ac_tx_sign(&tx, priv);
+    ac_block_create(prev, &tx, 1, blk);
+}
+
+/* Pad subnet_id to AC_SUBNET_ID_LEN for ac_subnet_find lookups */
+static void pad_subnet_id(uint8_t out[AC_SUBNET_ID_LEN], const char *id)
+{
+    memset(out, 0, AC_SUBNET_ID_LEN);
+    if (id) {
+        size_t len = strlen(id);
+        if (len >= AC_SUBNET_ID_LEN)
+            len = AC_SUBNET_ID_LEN - 1;
+        memcpy(out, id, len);
+    }
+}
+
+/* ================================================================== */
+/*  SUBNET_UPDATE tests                                                */
+/* ================================================================== */
+
+static void test_subnet_update_gateway(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    const ac_subnet_record_t *rec;
+    ac_address_t new_gw;
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("UPDATE gateway (UPD_GATEWAY)");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "upd-gw", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    set_ipv4_addr(&new_gw, 10, 0, 0, 254, 24);
+    make_subnet_update_block(&blk2, &blk1, pub, priv,
+                             "upd-gw", AC_SUBNET_UPD_GATEWAY,
+                             NULL, &new_gw, NULL, 0, 0, 0, 2);
+
+    ASSERT_OK(ac_subnet_validate_block(&ss, &blk2), "validate should pass");
+    ASSERT_OK(ac_subnet_apply_block(&ss, &blk2), "apply should succeed");
+
+    pad_subnet_id(sid, "upd-gw");
+    rec = ac_subnet_find(&ss, sid);
+    ASSERT_NE((uintptr_t)rec, (uintptr_t)NULL, "should find subnet");
+    ASSERT_EQ(rec->gateway.addr[3], 254, "gateway should be .254");
+    ASSERT_EQ(rec->prefix.addr[0], 10, "prefix unchanged");
+    ASSERT_EQ(rec->prefix.prefix_len, 24, "prefix_len unchanged");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_update_dns(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    const ac_subnet_record_t *rec;
+    ac_address_t new_dns;
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("UPDATE dns (UPD_DNS)");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "upd-dns", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    set_ipv4_addr(&new_dns, 1, 1, 1, 1, 32);
+    make_subnet_update_block(&blk2, &blk1, pub, priv,
+                             "upd-dns", AC_SUBNET_UPD_DNS,
+                             NULL, NULL, &new_dns, 1, 0, 0, 2);
+
+    ASSERT_OK(ac_subnet_validate_block(&ss, &blk2), "validate should pass");
+    ASSERT_OK(ac_subnet_apply_block(&ss, &blk2), "apply should succeed");
+
+    pad_subnet_id(sid, "upd-dns");
+    rec = ac_subnet_find(&ss, sid);
+    ASSERT_NE((uintptr_t)rec, (uintptr_t)NULL, "should find subnet");
+    ASSERT_EQ(rec->dns[0].addr[0], 1, "dns should be 1.1.1.1");
+    ASSERT_EQ(rec->dns[0].addr[3], 1, "dns last byte should be 1");
+    ASSERT_EQ(rec->dns_count, 1, "dns_count should be 1");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_update_vlan(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    const ac_subnet_record_t *rec;
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("UPDATE vlan_id (UPD_VLAN)");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "upd-vlan", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    make_subnet_update_block(&blk2, &blk1, pub, priv,
+                             "upd-vlan", AC_SUBNET_UPD_VLAN,
+                             NULL, NULL, NULL, 0, 42, 0, 2);
+
+    ASSERT_OK(ac_subnet_validate_block(&ss, &blk2), "validate should pass");
+    ASSERT_OK(ac_subnet_apply_block(&ss, &blk2), "apply should succeed");
+
+    pad_subnet_id(sid, "upd-vlan");
+    rec = ac_subnet_find(&ss, sid);
+    ASSERT_NE((uintptr_t)rec, (uintptr_t)NULL, "should find subnet");
+    ASSERT_EQ(rec->vlan_id, 42, "vlan_id should be 42");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_update_prefix_no_overlap(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2, blk3;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    const ac_subnet_record_t *rec;
+    ac_address_t new_prefix;
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("UPDATE prefix no overlap (UPD_PREFIX)");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    /* 10.1.0.0/24 */
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "pfx-a", 10, 1, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    /* 10.2.0.0/24 */
+    make_subnet_create_block(&blk2, &blk1, pub, priv,
+                             "pfx-b", 10, 2, 0, 0, 24, 1, 0, 2);
+    ac_subnet_apply_block(&ss, &blk2);
+
+    /* Update pfx-a to 10.3.0.0/24 — no overlap with pfx-b */
+    set_ipv4_addr(&new_prefix, 10, 3, 0, 0, 24);
+    {
+        ac_address_t new_gw;
+        set_ipv4_addr(&new_gw, 10, 3, 0, 1, 24);
+        make_subnet_update_block(&blk3, &blk2, pub, priv,
+                                 "pfx-a",
+                                 AC_SUBNET_UPD_PREFIX | AC_SUBNET_UPD_GATEWAY,
+                                 &new_prefix, &new_gw, NULL, 0, 0, 0, 3);
+    }
+
+    ASSERT_OK(ac_subnet_validate_block(&ss, &blk3), "non-overlap update should pass");
+    ASSERT_OK(ac_subnet_apply_block(&ss, &blk3), "apply should succeed");
+
+    pad_subnet_id(sid, "pfx-a");
+    rec = ac_subnet_find(&ss, sid);
+    ASSERT_NE((uintptr_t)rec, (uintptr_t)NULL, "should find subnet");
+    ASSERT_EQ(rec->prefix.addr[1], 3, "prefix second byte should be 3");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_update_prefix_overlap_rejected(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2, blk3;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    ac_address_t new_prefix;
+    int rc;
+    TEST("UPDATE prefix overlap rejected (N11)");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    /* 10.1.0.0/24 */
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "ovl-a", 10, 1, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    /* 10.2.0.0/24 */
+    make_subnet_create_block(&blk2, &blk1, pub, priv,
+                             "ovl-b", 10, 2, 0, 0, 24, 1, 0, 2);
+    ac_subnet_apply_block(&ss, &blk2);
+
+    /* Update ovl-a to 10.2.0.0/24 — overlaps ovl-b */
+    set_ipv4_addr(&new_prefix, 10, 2, 0, 0, 24);
+    {
+        ac_address_t new_gw;
+        set_ipv4_addr(&new_gw, 10, 2, 0, 1, 24);
+        make_subnet_update_block(&blk3, &blk2, pub, priv,
+                                 "ovl-a",
+                                 AC_SUBNET_UPD_PREFIX | AC_SUBNET_UPD_GATEWAY,
+                                 &new_prefix, &new_gw, NULL, 0, 0, 0, 3);
+    }
+
+    rc = ac_subnet_validate_block(&ss, &blk3);
+    ASSERT_EQ(rc, AC_ERR_OVERLAP, "overlapping prefix update should be rejected");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_update_nonexistent(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    int rc;
+    TEST("UPDATE nonexistent subnet rejected");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_update_block(&blk, &genesis, pub, priv,
+                             "ghost-upd", AC_SUBNET_UPD_VLAN,
+                             NULL, NULL, NULL, 0, 100, 0, 1);
+
+    rc = ac_subnet_validate_block(&ss, &blk);
+    ASSERT_EQ(rc, AC_ERR_NOENT, "update nonexistent should fail");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_update_deleted_subnet(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2, blk3;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    int rc;
+    TEST("UPDATE deleted subnet rejected");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "del-upd", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    make_subnet_delete_block(&blk2, &blk1, pub, priv, "del-upd", 2);
+    ac_subnet_apply_block(&ss, &blk2);
+
+    make_subnet_update_block(&blk3, &blk2, pub, priv,
+                             "del-upd", AC_SUBNET_UPD_VLAN,
+                             NULL, NULL, NULL, 0, 99, 0, 3);
+
+    rc = ac_subnet_validate_block(&ss, &blk3);
+    ASSERT_EQ(rc, AC_ERR_NOENT, "update deleted subnet should fail");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+/* ================================================================== */
+/*  SUBNET_DELETE tests                                                */
+/* ================================================================== */
+
+static void test_subnet_delete_empty(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("DELETE empty subnet");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "del-emp", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+    ASSERT_EQ(ac_subnet_count(&ss), 1, "should have 1 subnet");
+
+    make_subnet_delete_block(&blk2, &blk1, pub, priv, "del-emp", 2);
+    ASSERT_OK(ac_subnet_validate_block(&ss, &blk2), "validate should pass");
+    ASSERT_OK(ac_subnet_apply_block(&ss, &blk2), "apply should succeed");
+    ASSERT_EQ(ac_subnet_count(&ss), 0, "count should be 0 after delete");
+
+    pad_subnet_id(sid, "del-emp");
+    ASSERT_EQ((uintptr_t)ac_subnet_find(&ss, sid), (uintptr_t)NULL,
+              "find should return NULL for deleted subnet");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_delete_nonexistent(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    int rc;
+    TEST("DELETE nonexistent subnet rejected");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_delete_block(&blk, &genesis, pub, priv, "no-exist", 1);
+    rc = ac_subnet_validate_block(&ss, &blk);
+    ASSERT_EQ(rc, AC_ERR_NOENT, "delete nonexistent should fail");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_delete_already_deleted(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2, blk3;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    int rc;
+    TEST("DELETE already deleted subnet rejected");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "dbl-del", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    make_subnet_delete_block(&blk2, &blk1, pub, priv, "dbl-del", 2);
+    ac_subnet_apply_block(&ss, &blk2);
+
+    make_subnet_delete_block(&blk3, &blk2, pub, priv, "dbl-del", 3);
+    rc = ac_subnet_validate_block(&ss, &blk3);
+    ASSERT_EQ(rc, AC_ERR_NOENT, "second delete should fail");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+static void test_subnet_recreate_after_delete(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, blk2, blk3;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    const ac_subnet_record_t *rec;
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("recreate after DELETE (S18)");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "re-create", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    make_subnet_delete_block(&blk2, &blk1, pub, priv, "re-create", 2);
+    ac_subnet_apply_block(&ss, &blk2);
+    ASSERT_EQ(ac_subnet_count(&ss), 0, "count should be 0 after delete");
+
+    /* Recreate with same subnet_id but different prefix */
+    make_subnet_create_block(&blk3, &blk2, pub, priv,
+                             "re-create", 10, 5, 0, 0, 24, 1, 0, 3);
+    ASSERT_OK(ac_subnet_validate_block(&ss, &blk3), "recreate should validate");
+    ASSERT_OK(ac_subnet_apply_block(&ss, &blk3), "recreate apply should succeed");
+    ASSERT_EQ(ac_subnet_count(&ss), 1, "count should be 1 after recreate");
+
+    pad_subnet_id(sid, "re-create");
+    rec = ac_subnet_find(&ss, sid);
+    ASSERT_NE((uintptr_t)rec, (uintptr_t)NULL, "should find recreated subnet");
+    ASSERT_EQ(rec->active, 1, "recreated subnet should be active");
+    ASSERT_EQ(rec->prefix.addr[1], 5, "recreated prefix should be 10.5.0.0");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+/* ================================================================== */
+/*  S16: UPDATE+DELETE conflict in same block                          */
+/* ================================================================== */
+
+static void test_subnet_update_delete_same_block_rejected(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t genesis, blk1, conflict_blk;
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    int rc;
+    TEST("S16 UPDATE+DELETE same block rejected");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+    ac_genesis_block(&genesis);
+
+    make_subnet_create_block(&blk1, &genesis, pub, priv,
+                             "s16-net", 10, 0, 0, 0, 24, 1, 0, 1);
+    ac_subnet_apply_block(&ss, &blk1);
+
+    /* Build a block with both UPDATE and DELETE for same subnet_id */
+    {
+        ac_transaction_t txs[2];
+
+        memset(&txs[0], 0, sizeof(txs[0]));
+        txs[0].type = AC_TX_SUBNET_UPDATE;
+        memcpy(txs[0].node_pubkey, pub, AC_PUBKEY_LEN);
+        txs[0].timestamp = ac_time_unix_sec();
+        txs[0].nonce = 2;
+        memcpy(txs[0].payload.subnet_update.subnet_id, "s16-net", 7);
+        txs[0].payload.subnet_update.update_mask = AC_SUBNET_UPD_VLAN;
+        txs[0].payload.subnet_update.vlan_id = 99;
+        ac_tx_sign(&txs[0], priv);
+
+        memset(&txs[1], 0, sizeof(txs[1]));
+        txs[1].type = AC_TX_SUBNET_DELETE;
+        memcpy(txs[1].node_pubkey, pub, AC_PUBKEY_LEN);
+        txs[1].timestamp = ac_time_unix_sec();
+        txs[1].nonce = 3;
+        memcpy(txs[1].payload.subnet_delete.subnet_id, "s16-net", 7);
+        ac_tx_sign(&txs[1], priv);
+
+        ac_block_create(&blk1, txs, 2, &conflict_blk);
+    }
+
+    rc = ac_subnet_validate_block(&ss, &conflict_blk);
+    ASSERT_EQ(rc, AC_ERR_CONFLICT, "UPDATE+DELETE in same block should be rejected");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+/* ================================================================== */
+/*  Rebuild with UPDATE and DELETE                                     */
+/* ================================================================== */
+
+static void test_subnet_rebuild_with_update_delete(void)
+{
+    ac_subnet_store_t ss;
+    ac_block_t blocks[4];
+    uint8_t pub[AC_PUBKEY_LEN], priv[64];
+    ac_address_t new_gw;
+    uint8_t sid[AC_SUBNET_ID_LEN];
+    TEST("rebuild with UPDATE and DELETE");
+
+    ac_subnet_init(&ss, 0, 0);
+    make_keypair(pub, priv);
+
+    /* Block 0: genesis */
+    ac_genesis_block(&blocks[0]);
+
+    /* Block 1: create subnet */
+    make_subnet_create_block(&blocks[1], &blocks[0], pub, priv,
+                             "rbd-net", 10, 0, 0, 0, 24, 1, 0, 1);
+
+    /* Block 2: update gateway */
+    set_ipv4_addr(&new_gw, 10, 0, 0, 99, 24);
+    make_subnet_update_block(&blocks[2], &blocks[1], pub, priv,
+                             "rbd-net", AC_SUBNET_UPD_GATEWAY,
+                             NULL, &new_gw, NULL, 0, 0, 0, 2);
+
+    /* Block 3: delete subnet */
+    make_subnet_delete_block(&blocks[3], &blocks[2], pub, priv,
+                             "rbd-net", 3);
+
+    ASSERT_OK(ac_subnet_rebuild(&ss, blocks, 4), "rebuild should succeed");
+    ASSERT_EQ(ac_subnet_count(&ss), 0, "subnet should be deleted after rebuild");
+
+    pad_subnet_id(sid, "rbd-net");
+    ASSERT_EQ((uintptr_t)ac_subnet_find(&ss, sid), (uintptr_t)NULL,
+              "find should return NULL after rebuild with delete");
+
+    ac_subnet_destroy(&ss);
+    PASS();
+}
+
+/* ================================================================== */
 /*  Main                                                               */
 /* ================================================================== */
 
@@ -604,6 +1159,27 @@ int main(void)
     test_subnet_gateway_outside_prefix();
     test_subnet_overlaps_utility();
     test_subnet_empty_id_rejected();
+
+    /* SUBNET_UPDATE tests */
+    test_subnet_update_gateway();
+    test_subnet_update_dns();
+    test_subnet_update_vlan();
+    test_subnet_update_prefix_no_overlap();
+    test_subnet_update_prefix_overlap_rejected();
+    test_subnet_update_nonexistent();
+    test_subnet_update_deleted_subnet();
+
+    /* SUBNET_DELETE tests */
+    test_subnet_delete_empty();
+    test_subnet_delete_nonexistent();
+    test_subnet_delete_already_deleted();
+    test_subnet_recreate_after_delete();
+
+    /* S16: conflict detection */
+    test_subnet_update_delete_same_block_rejected();
+
+    /* Rebuild with UPDATE/DELETE */
+    test_subnet_rebuild_with_update_delete();
 
     printf("\n=== Results: %d passed, %d failed, %d total ===\n",
            pass_count, fail_count, test_count);
