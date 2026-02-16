@@ -58,6 +58,7 @@ ac_transaction_t (packed)
 | `0x20` | VPN_TUNNEL     | `ac_tx_vpn_tunnel_t`       | Register VPN tunnel endpoint   |
 | `0x21` | VPN_KEY        | `ac_tx_vpn_key_t`          | Publish VPN public key         |
 | `0x30` | PARTITION      | `ac_tx_partition_t`        | Create/modify partitions       |
+| `0x40` | SNAPSHOT       | `ac_tx_snapshot_t`         | Record state snapshot hash     |
 
 ## 5. Block Structure
 
@@ -225,17 +226,13 @@ Stale non-static peers pruned after 30 s. Best peer selected by highest `chain_h
 
 ## 10. Limits Summary
 
-| Resource              | Limit  | Constant                   |
-|-----------------------|--------|----------------------------|
-| Transactions/block    | 64     | `AC_MAX_TX_PER_BLOCK`      |
-| Chain blocks          | 4,096  | `AC_MAX_CHAIN_BLOCKS`      |
-| Peers                 | 256    | `AC_MAX_PEERS`             |
-| Sequence entries      | 256    | `AC_MAX_SEQ_ENTRIES`       |
-| Claims                | 4,096  | `AC_MAX_CLAIMS`            |
-| Subnets               | 256    | `AC_MAX_SUBNETS`           |
-| Partitions            | 64     | `AC_MAX_PARTITIONS`        |
-| VPN tunnels           | 128    | `AC_MAX_VPN_TUNNELS`       |
-| Revocations           | 256    | `AC_MAX_REVOCATIONS`       |
+| Resource              | Limit     | Constant / Config             |
+|-----------------------|-----------|-------------------------------|
+| Transactions/block    | 64        | `AC_MAX_TX_PER_BLOCK`         |
+| Chain blocks          | dynamic   | module param `max_chain_blocks` (kernel default 65536) |
+| VPN allowed IPs       | 16        | `AC_MAX_VPN_ALLOWED_IPS`      |
+| DNS addresses         | 4         | `AC_MAX_DNS_ADDRS`            |
+| All other stores      | dynamic   | hashmap-backed, no compile-time limit |
 
 ## 11. Error Codes
 

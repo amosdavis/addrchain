@@ -36,6 +36,11 @@ MODULE_AUTHOR("addrchain contributors");
 MODULE_DESCRIPTION("Blockchain-based network address management");
 MODULE_VERSION("2.0.0");
 
+/* K37/S25: configurable chain capacity via module parameter */
+static uint32_t max_chain_blocks = 65536;
+module_param(max_chain_blocks, uint, 0444);
+MODULE_PARM_DESC(max_chain_blocks, "Maximum chain blocks in kernel (default 65536)");
+
 /* Minimum kernel version: 5.15 (K22) */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 #error "addrchain requires Linux kernel 5.15 or later"
@@ -154,7 +159,7 @@ static long ac_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         /* Validate block against current chain */
         ac_mutex_lock(&ac_chain_lock);
 
-        if (ac_chain_len >= AC_MAX_CHAIN_BLOCKS) {
+        if (ac_chain_len >= max_chain_blocks) {
             ac_mutex_unlock(&ac_chain_lock);
             kfree(blk);
             return -ENOSPC; /* K37: bounded chain growth */
@@ -272,7 +277,7 @@ static int __init ac_module_init(void)
         goto fail_crypto;
 
     /* Step 2: Chain storage */
-    ac_chain = kvmalloc_array(AC_MAX_CHAIN_BLOCKS, sizeof(ac_block_t),
+    ac_chain = kvmalloc_array(max_chain_blocks, sizeof(ac_block_t),
                               GFP_KERNEL | __GFP_ZERO);
     if (!ac_chain) {
         ret = -ENOMEM;

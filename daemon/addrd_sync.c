@@ -187,7 +187,7 @@ static int sync_with_peer(const ac_peer_t *peer)
     if (peer_height > local_height) {
         /* Pull blocks from peer */
         uint32_t i;
-        for (i = local_height; i < peer_height && i < AC_MAX_CHAIN_BLOCKS; i++) {
+        for (i = local_height; i < peer_height; i++) {
             ac_block_t blk;
             uint32_t recv_len;
 

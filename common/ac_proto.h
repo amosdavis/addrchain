@@ -41,7 +41,8 @@
 #define AC_SUBNET_ID_LEN        32      /* null-terminated subnet name */
 #define AC_PARTITION_ID_LEN     32      /* null-terminated partition   */
 #define AC_MAX_TX_PER_BLOCK     64
-#define AC_MAX_CHAIN_BLOCKS     4096    /* kernel-side pruning limit   */
+/* S25: AC_MAX_CHAIN_BLOCKS removed — chain capacity is now dynamic
+ * (userspace) or configurable via module param (kernel).            */
 #define AC_MAX_DNS_ADDRS        4       /* max DNS servers per subnet  */
 #define AC_MAX_VPN_ALLOWED_IPS  16      /* max AllowedIPs entries      */
 
@@ -65,6 +66,11 @@
 
 /* Virtual NIC limits */
 #define AC_MAX_VNICS            64
+
+/* Snapshot / pruning */
+#define AC_SNAPSHOT_INTERVAL    1000    /* create snapshot every N blocks */
+#define AC_SNAPSHOT_MAGIC       0x41435353  /* "ACSS" in little-endian */
+#define AC_SNAPSHOT_VERSION     1
 
 /* ------------------------------------------------------------------ */
 /*  Address family                                                     */
@@ -92,6 +98,7 @@ typedef enum {
     AC_TX_VPN_TUNNEL    = 0x20,
     AC_TX_VPN_KEY       = 0x21,
     AC_TX_PARTITION     = 0x30,
+    AC_TX_SNAPSHOT      = 0x40,
 } ac_tx_type_t;
 
 /* ------------------------------------------------------------------ */
@@ -224,6 +231,12 @@ typedef struct {
     uint16_t    vlan_id;                    /* for CREATE              */
 } ac_tx_partition_t;
 
+/* SNAPSHOT: record state hash at a checkpoint (S06, S07, S08, S22) */
+typedef struct {
+    uint32_t    snapshot_block;             /* block index at snapshot  */
+    uint8_t     state_hash[AC_HASH_LEN];   /* SHA-256 of serialized state */
+} ac_tx_snapshot_t;
+
 /* ---- Transaction envelope ---- */
 
 typedef struct {
@@ -247,6 +260,7 @@ typedef struct {
         ac_tx_vpn_tunnel_t      vpn_tunnel;
         ac_tx_vpn_key_t         vpn_key;
         ac_tx_partition_t       partition;
+        ac_tx_snapshot_t        snapshot;
     } payload;
 
     uint8_t     signature[AC_SIG_LEN];      /* Ed25519(hash(header+payload)) */
@@ -304,6 +318,7 @@ static inline const char *ac_tx_type_name(uint8_t type)
     case AC_TX_VPN_TUNNEL:      return "VPN_TUNNEL";
     case AC_TX_VPN_KEY:         return "VPN_KEY";
     case AC_TX_PARTITION:       return "PARTITION";
+    case AC_TX_SNAPSHOT:        return "SNAPSHOT";
     default:                    return "UNKNOWN";
     }
 }

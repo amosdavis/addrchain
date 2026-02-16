@@ -13,7 +13,7 @@
  *   K25  — Atomic chain replacement via pointer swap
  *   K35  — Independent validation of every block
  *   K36  — Per-block validation, not full-chain rescan
- *   K37  — Pruning to AC_MAX_CHAIN_BLOCKS kernel limit
+ *   K37  — Pruning via configurable max_blocks
  *   K38  — Fork resolution via longest-chain-wins + hash tiebreaker
  *   N06  — Deterministic FCFS conflict resolution
  *   N08  — Ed25519 signature verification on every transaction
@@ -58,6 +58,9 @@ typedef struct {
 
     /* Nonce replay tracker */
     ac_hashmap_t    seq_map;            /* pubkey -> ac_seq_entry_t*    */
+
+    /* S25: configurable max (0 = unlimited userspace, >0 = kernel cap) */
+    uint32_t        max_blocks;
 
     /* Audit ring buffer (P49: change journaling tenet) */
     uint32_t        audit_count;        /* total state changes logged   */

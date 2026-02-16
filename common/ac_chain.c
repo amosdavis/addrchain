@@ -834,18 +834,18 @@ static int chain_ensure_capacity(ac_chain_t *chain, uint32_t needed)
     if (needed <= chain->capacity)
         return AC_OK;
 
-    /* K37: enforce pruning limit */
-    if (needed > AC_MAX_CHAIN_BLOCKS) {
+    /* S25: enforce configurable max (0 = unlimited) */
+    if (chain->max_blocks > 0 && needed > chain->max_blocks) {
         ac_log_error("chain would exceed max blocks (%u > %u)",
-                     needed, AC_MAX_CHAIN_BLOCKS);
+                     needed, chain->max_blocks);
         return AC_ERR_FULL;
     }
 
     new_cap = chain->capacity * 2;
     if (new_cap < needed)
         new_cap = needed;
-    if (new_cap > AC_MAX_CHAIN_BLOCKS)
-        new_cap = AC_MAX_CHAIN_BLOCKS;
+    if (chain->max_blocks > 0 && new_cap > chain->max_blocks)
+        new_cap = chain->max_blocks;
 
     new_blocks = (ac_block_t *)ac_zalloc(
         new_cap * sizeof(ac_block_t), AC_MEM_NORMAL);
@@ -933,8 +933,8 @@ int ac_chain_replace(ac_chain_t *chain,
         return 0;
     }
 
-    /* K37: enforce max chain length */
-    if (candidate_len > AC_MAX_CHAIN_BLOCKS) {
+    /* S25: enforce configurable max (0 = unlimited) */
+    if (chain->max_blocks > 0 && candidate_len > chain->max_blocks) {
         *err = AC_ERR_FULL;
         return 0;
     }
